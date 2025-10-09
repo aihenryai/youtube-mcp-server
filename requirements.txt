@@ -1,0 +1,17 @@
+# MCP Framework
+fastmcp==2.8.0
+
+# YouTube APIs
+youtube-transcript-api==0.6.2
+google-api-python-client==2.147.0
+google-auth==2.34.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# HTTP Server (for cloud deployment)
+uvicorn==0.30.6
+fastapi==0.114.2
