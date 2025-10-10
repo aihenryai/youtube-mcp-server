@@ -5,12 +5,15 @@ Centralized settings for cache, rate limiting, security, and API configuration
 """
 
 import os
+import logging
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class CacheConfig(BaseModel):
@@ -35,6 +38,21 @@ class CacheConfig(BaseModel):
         default=100,
         description="Maximum items in memory cache"
     )
+    
+    max_disk_size_mb: int = Field(
+        default=500,  # 500 MB
+        description="Maximum disk cache size in megabytes"
+    )
+    
+    cleanup_interval_hours: int = Field(
+        default=24,
+        description="How often to run cache cleanup (hours)"
+    )
+    
+    @validator('enabled', pre=True, always=True)
+    def set_enabled(cls, v):
+        env_val = os.getenv("CACHE_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
 
 
 class RateLimitConfig(BaseModel):
@@ -59,6 +77,21 @@ class RateLimitConfig(BaseModel):
         default=10,
         description="Maximum burst size for rate limiter"
     )
+    
+    persistent_state: bool = Field(
+        default=True,
+        description="Save rate limit state to disk"
+    )
+    
+    state_file: str = Field(
+        default="rate_limit_state.json",
+        description="File to store rate limit state"
+    )
+    
+    @validator('enabled', pre=True, always=True)
+    def set_enabled(cls, v):
+        env_val = os.getenv("RATE_LIMIT_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
 
 
 class SecurityConfig(BaseModel):
@@ -116,11 +149,27 @@ class YouTubeAPIConfig(BaseModel):
         description="Daily quota limit (units)"
     )
     
+    validate_on_startup: bool = Field(
+        default=True,
+        description="Validate API key on server startup"
+    )
+    
     @validator('api_key', pre=True, always=True)
     def validate_api_key(cls, v):
         api_key = v or os.getenv("YOUTUBE_API_KEY")
         if not api_key:
-            raise ValueError("YOUTUBE_API_KEY is required")
+            raise ValueError(
+                "YOUTUBE_API_KEY is required. "
+                "Please set it in your .env file or environment variables."
+            )
+        
+        # Basic format validation
+        if len(api_key) < 30:
+            logger.warning(
+                "⚠️  YouTube API key seems too short. "
+                "Make sure you're using a valid API key from Google Cloud Console."
+            )
+        
         return api_key
 
 
@@ -174,6 +223,11 @@ class ServerConfig(BaseModel):
         description="Logging level"
     )
     
+    environment: str = Field(
+        default="production",
+        description="Environment: development, staging, or production"
+    )
+    
     @validator('transport', pre=True, always=True)
     def set_transport(cls, v):
         return v or os.getenv("MCP_TRANSPORT", "stdio")
@@ -181,6 +235,42 @@ class ServerConfig(BaseModel):
     @validator('port', pre=True, always=True)
     def set_port(cls, v):
         return int(v or os.getenv("PORT", 8080))
+    
+    @validator('environment', pre=True, always=True)
+    def set_environment(cls, v):
+        return v or os.getenv("ENVIRONMENT", "production")
+
+
+class ProxyConfig(BaseModel):
+    """Proxy configuration"""
+    
+    enabled: bool = Field(
+        default=False,
+        description="Enable proxy for API requests"
+    )
+    
+    http_proxy: Optional[str] = Field(
+        default=None,
+        description="HTTP proxy URL"
+    )
+    
+    https_proxy: Optional[str] = Field(
+        default=None,
+        description="HTTPS proxy URL"
+    )
+    
+    @validator('enabled', pre=True, always=True)
+    def set_enabled(cls, v):
+        env_val = os.getenv("PROXY_ENABLED", "false").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('http_proxy', pre=True, always=True)
+    def set_http_proxy(cls, v):
+        return v or os.getenv("HTTP_PROXY")
+    
+    @validator('https_proxy', pre=True, always=True)
+    def set_https_proxy(cls, v):
+        return v or os.getenv("HTTPS_PROXY")
 
 
 class AppConfig(BaseModel):
@@ -192,6 +282,7 @@ class AppConfig(BaseModel):
     youtube_api: YouTubeAPIConfig = Field(default_factory=YouTubeAPIConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
+    proxy: ProxyConfig = Field(default_factory=ProxyConfig)
     
     class Config:
         validate_assignment = True
@@ -203,5 +294,55 @@ def get_config() -> AppConfig:
     return AppConfig()
 
 
+def validate_youtube_api_key(api_key: str) -> tuple[bool, Optional[str]]:
+    """
+    Validate YouTube API key by making a test request
+    
+    Args:
+        api_key: YouTube API key to validate
+        
+    Returns:
+        (is_valid: bool, error_message: Optional[str])
+    """
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
+        
+        # Try to build YouTube client and make a simple request
+        youtube = build("youtube", "v3", developerKey=api_key, cache_discovery=False)
+        
+        # Make a minimal quota request (1 unit)
+        youtube.videos().list(part="id", id="dQw4w9WgXcQ").execute()
+        
+        logger.info("✅ YouTube API key validated successfully")
+        return True, None
+        
+    except HttpError as e:
+        if e.status_code == 400:
+            error_msg = "❌ Invalid YouTube API key format"
+        elif e.status_code == 403:
+            error_msg = "❌ YouTube API key is valid but lacks required permissions"
+        else:
+            error_msg = f"❌ YouTube API error: {e.status_code}"
+        
+        logger.error(error_msg)
+        return False, error_msg
+        
+    except Exception as e:
+        error_msg = f"❌ Failed to validate YouTube API key: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
+
 # Export config for easy import
 config = get_config()
+
+# Validate API key on import if enabled
+if config.youtube_api.validate_on_startup:
+    is_valid, error = validate_youtube_api_key(config.youtube_api.api_key)
+    if not is_valid:
+        logger.warning(
+            f"{error}\n"
+            "⚠️  Server will start but API calls may fail.\n"
+            "Please check your YouTube API key in .env file."
+        )
