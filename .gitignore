@@ -39,3 +39,13 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Cache
+*.cache
+.pytest_cache/
+cache/
+.cache/
+
+# Logs
+*.log
+logs/
