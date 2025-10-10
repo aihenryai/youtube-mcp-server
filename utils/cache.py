@@ -2,14 +2,19 @@
 """
 Cache management for YouTube MCP Server
 Implements hybrid caching strategy with memory and disk layers
+Includes automatic cleanup and size management
 """
 
 import json
 import hashlib
 import logging
+import os
+import time
+import threading
 from typing import Any, Optional, Callable
 from functools import wraps
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from cachetools import TTLCache
 from diskcache import Cache
@@ -19,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class CacheManager:
-    """Manages two-tier caching: memory (fast) + disk (persistent)"""
+    """Manages two-tier caching: memory (fast) + disk (persistent) with automatic cleanup"""
     
     def __init__(self):
         """Initialize cache manager with memory and disk caches"""
@@ -35,12 +40,35 @@ class CacheManager:
             # Disk cache - slower, larger capacity
             self.disk_cache = Cache(config.cache.cache_dir)
             
+            # Cleanup configuration
+            self.max_disk_size_bytes = config.cache.max_disk_size_mb * 1024 * 1024
+            self.cleanup_interval_seconds = config.cache.cleanup_interval_hours * 3600
+            self.last_cleanup_time = time.time()
+            
+            # Start background cleanup thread
+            self._start_cleanup_thread()
+            
             logger.info(
                 f"Cache initialized: memory={config.cache.max_memory_items} items, "
-                f"disk={config.cache.cache_dir}, ttl={config.cache.ttl_seconds}s"
+                f"disk={config.cache.cache_dir}, ttl={config.cache.ttl_seconds}s, "
+                f"max_size={config.cache.max_disk_size_mb}MB"
             )
         else:
             logger.info("Cache disabled")
+    
+    def _start_cleanup_thread(self):
+        """Start background thread for automatic cache cleanup"""
+        def cleanup_worker():
+            while True:
+                try:
+                    time.sleep(self.cleanup_interval_seconds)
+                    self.auto_cleanup()
+                except Exception as e:
+                    logger.error(f"Cache cleanup error: {e}")
+        
+        cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+        cleanup_thread.start()
+        logger.info("Cache cleanup thread started")
     
     def _generate_key(self, func_name: str, *args, **kwargs) -> str:
         """Generate unique cache key from function name and arguments"""
@@ -88,6 +116,9 @@ class CacheManager:
         self.disk_cache.set(key, value, expire=ttl)
         
         logger.debug(f"Cache SET: {key[:16]}... (ttl={ttl}s)")
+        
+        # Check if cleanup is needed
+        self._check_cleanup_needed()
     
     def delete(self, key: str) -> None:
         """Delete value from both caches"""
@@ -109,17 +140,128 @@ class CacheManager:
         
         logger.info("Cache cleared")
     
+    def _check_cleanup_needed(self) -> None:
+        """Check if cleanup is needed based on size or time"""
+        current_time = time.time()
+        
+        # Time-based cleanup check
+        if current_time - self.last_cleanup_time < self.cleanup_interval_seconds:
+            return
+        
+        # Size-based cleanup check
+        try:
+            disk_size = self.get_disk_cache_size()
+            if disk_size > self.max_disk_size_bytes:
+                logger.info(f"Cache size ({disk_size / 1024 / 1024:.2f}MB) exceeds limit, cleaning up...")
+                self.auto_cleanup()
+        except Exception as e:
+            logger.warning(f"Failed to check cache size: {e}")
+    
+    def get_disk_cache_size(self) -> int:
+        """
+        Get total size of disk cache in bytes
+        
+        Returns:
+            Total size in bytes
+        """
+        if not self.enabled:
+            return 0
+        
+        try:
+            cache_dir = Path(config.cache.cache_dir)
+            if not cache_dir.exists():
+                return 0
+            
+            total_size = 0
+            for file in cache_dir.rglob('*'):
+                if file.is_file():
+                    total_size += file.stat().st_size
+            
+            return total_size
+        except Exception as e:
+            logger.warning(f"Failed to calculate cache size: {e}")
+            return 0
+    
+    def auto_cleanup(self) -> dict:
+        """
+        Automatically clean up old and large cache entries
+        
+        Returns:
+            Dictionary with cleanup statistics
+        """
+        if not self.enabled:
+            return {"enabled": False}
+        
+        logger.info("Starting automatic cache cleanup...")
+        
+        initial_size = self.get_disk_cache_size()
+        initial_count = len(self.disk_cache)
+        
+        # Disk cache cleanup (using diskcache's built-in methods)
+        try:
+            # Remove expired entries
+            self.disk_cache.expire()
+            
+            # If still over limit, remove oldest entries
+            current_size = self.get_disk_cache_size()
+            if current_size > self.max_disk_size_bytes:
+                # Calculate how much to remove
+                target_size = self.max_disk_size_bytes * 0.8  # 80% of max
+                
+                # Remove oldest entries until under target
+                removed = 0
+                for key in list(self.disk_cache):
+                    if self.get_disk_cache_size() <= target_size:
+                        break
+                    self.disk_cache.delete(key)
+                    removed += 1
+                
+                logger.info(f"Removed {removed} old entries to stay under size limit")
+        
+        except Exception as e:
+            logger.error(f"Cache cleanup error: {e}")
+        
+        final_size = self.get_disk_cache_size()
+        final_count = len(self.disk_cache)
+        
+        self.last_cleanup_time = time.time()
+        
+        stats = {
+            "enabled": True,
+            "initial_size_mb": initial_size / 1024 / 1024,
+            "final_size_mb": final_size / 1024 / 1024,
+            "freed_mb": (initial_size - final_size) / 1024 / 1024,
+            "initial_count": initial_count,
+            "final_count": final_count,
+            "removed_count": initial_count - final_count,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        logger.info(
+            f"Cache cleanup completed: "
+            f"freed {stats['freed_mb']:.2f}MB, "
+            f"removed {stats['removed_count']} entries"
+        )
+        
+        return stats
+    
     def get_stats(self) -> dict:
         """Get cache statistics"""
         if not self.enabled:
             return {"enabled": False}
+        
+        disk_size_bytes = self.get_disk_cache_size()
         
         return {
             "enabled": True,
             "memory_size": len(self.memory_cache),
             "memory_maxsize": self.memory_cache.maxsize,
             "disk_size": len(self.disk_cache),
-            "ttl_seconds": config.cache.ttl_seconds
+            "disk_size_mb": disk_size_bytes / 1024 / 1024,
+            "disk_size_limit_mb": config.cache.max_disk_size_mb,
+            "disk_usage_percent": (disk_size_bytes / self.max_disk_size_bytes) * 100 if self.max_disk_size_bytes > 0 else 0,
+            "ttl_seconds": config.cache.ttl_seconds,
+            "last_cleanup": datetime.fromtimestamp(self.last_cleanup_time).isoformat()
         }
 
 
@@ -190,3 +332,8 @@ def clear_cache() -> None:
 def cache_stats() -> dict:
     """Get cache statistics"""
     return cache_manager.get_stats()
+
+
+def cleanup_cache() -> dict:
+    """Manually trigger cache cleanup"""
+    return cache_manager.auto_cleanup()
