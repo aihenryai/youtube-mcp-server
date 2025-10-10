@@ -1,32 +1,37 @@
 # MCP Framework
-fastmcp==2.8.0
+fastmcp>=2.8.0,<3.0.0
 
 # YouTube APIs
-youtube-transcript-api==0.6.2
-google-api-python-client==2.147.0
-google-auth==2.34.0
-google-auth-oauthlib==1.2.1
-google-auth-httplib2==0.2.0
+youtube-transcript-api>=0.6.0,<1.0.0
+google-api-python-client>=2.140.0,<3.0.0
+google-auth>=2.30.0,<3.0.0
+google-auth-oauthlib>=1.2.0,<2.0.0
+google-auth-httplib2>=0.2.0,<1.0.0
 
 # Utilities
-python-dotenv==1.0.1
-pydantic==2.9.2
+python-dotenv>=1.0.0,<2.0.0
+pydantic>=2.9.0,<3.0.0
 
 # HTTP Server (for cloud deployment)
-uvicorn==0.30.6
-fastapi==0.114.2
+uvicorn>=0.30.0,<1.0.0
+fastapi>=0.114.0,<1.0.0
 
 # Performance & Security
-cachetools==5.3.2          # In-memory caching
-diskcache==5.6.3           # Persistent disk cache
-ratelimit==2.2.1           # Rate limiting
-slowapi==0.1.9             # Rate limiting for FastAPI
-tenacity==8.2.3            # Retry logic with exponential backoff
+cachetools>=5.3.0,<6.0.0          # In-memory caching
+diskcache>=5.6.0,<6.0.0           # Persistent disk cache
+ratelimit>=2.2.0,<3.0.0           # Rate limiting
+slowapi>=0.1.0,<1.0.0             # Rate limiting for FastAPI
+tenacity>=8.2.0,<9.0.0            # Retry logic with exponential backoff
 
 # Development & Testing
-pytest==7.4.3              # Testing framework
-pytest-asyncio==0.21.1     # Async testing
-pytest-cov==4.1.0          # Code coverage
-black==23.12.1             # Code formatter
-flake8==6.1.0              # Linter
-mypy==1.7.1                # Type checking
+pytest>=7.4.0,<9.0.0              # Testing framework
+pytest-asyncio>=0.21.0,<1.0.0     # Async testing
+pytest-cov>=4.1.0,<6.0.0          # Code coverage
+pytest-mock>=3.12.0,<4.0.0        # Mocking for tests
+black>=23.12.0,<25.0.0            # Code formatter
+flake8>=6.1.0,<8.0.0              # Linter
+mypy>=1.7.0,<2.0.0                # Type checking
+
+# Additional utilities
+requests>=2.31.0,<3.0.0           # HTTP requests (for proxy support)
+urllib3>=2.0.0,<3.0.0             # URL handling
