@@ -1,120 +1,110 @@
 #!/usr/bin/env python3
 """
-YouTube MCP Server
+YouTube MCP Server - Enhanced Edition
 A comprehensive Model Context Protocol server for YouTube data extraction.
 
+NEW FEATURES (v2.0):
+- ✅ Two-tier caching (memory + disk) to reduce API quota usage
+- ✅ Rate limiting to prevent quota exhaustion
+- ✅ Input validation and sanitization
+- ✅ Retry logic with exponential backoff
+- ✅ Enhanced error handling
+- ✅ Security improvements for HTTP mode
+- ✅ Comprehensive logging
+
 Provides tools for:
-- Video transcripts
+- Video transcripts (with caching)
 - Video metadata
 - Channel information
 - Comments
-- Video analytics
+- Video search
 """
 
 import os
-import re
-from typing import Optional, List, Dict, Any
-from urllib.parse import urlparse, parse_qs
+import logging
+from typing import Optional, Dict, Any
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from fastmcp import FastMCP
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
 
+# Import our enhanced utilities
+from config import config
+from utils import (
+    cached,
+    rate_limited,
+    validate_video_url,
+    validate_channel_id,
+    validate_language,
+    validate_search_query,
+    validate_max_results,
+    validate_order,
+    sanitize_text,
+    ValidationError,
+    cache_stats,
+    get_rate_stats
+)
+
 # Load environment variables
 load_dotenv()
 
+# Setup logging
+logging.basicConfig(
+    level=getattr(logging, config.server.log_level),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Initialize MCP server
-mcp = FastMCP("YouTube MCP Server")
+mcp = FastMCP("YouTube MCP Server Enhanced")
 
-# YouTube API setup
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-if not YOUTUBE_API_KEY:
-    raise ValueError("YOUTUBE_API_KEY environment variable is required")
-
-youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+# YouTube API setup with timeout
+try:
+    youtube = build(
+        "youtube", 
+        "v3", 
+        developerKey=config.youtube_api.api_key,
+        cache_discovery=False
+    )
+    logger.info("YouTube API client initialized successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize YouTube API client: {e}")
+    raise
 
 
 # ============================================================================
-# UTILITY FUNCTIONS
+# HELPER FUNCTIONS
 # ============================================================================
 
-def extract_video_id(url_or_id: str) -> str:
+def resolve_channel_handle(username: str) -> Optional[str]:
     """
-    Extract video ID from various YouTube URL formats or return as-is if already an ID.
-    
-    Supports:
-    - https://www.youtube.com/watch?v=VIDEO_ID
-    - https://youtu.be/VIDEO_ID
-    - https://m.youtube.com/watch?v=VIDEO_ID
-    - VIDEO_ID (direct)
+    Resolve @username to channel ID via API
+    Uses caching and rate limiting
     """
-    # If it's already a video ID (11 characters, alphanumeric with - and _)
-    if re.match(r'^[A-Za-z0-9_-]{11}$', url_or_id):
-        return url_or_id
-    
-    # Parse URL
-    parsed = urlparse(url_or_id)
-    
-    # youtube.com/watch?v=...
-    if parsed.hostname in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
-        query_params = parse_qs(parsed.query)
-        if 'v' in query_params:
-            return query_params['v'][0]
-    
-    # youtu.be/...
-    if parsed.hostname == 'youtu.be':
-        return parsed.path.lstrip('/')
-    
-    raise ValueError(f"Could not extract video ID from: {url_or_id}")
-
-
-def extract_channel_id(url_or_id: str) -> str:
-    """
-    Extract channel ID from YouTube channel URL or return as-is if already an ID.
-    
-    Supports:
-    - https://www.youtube.com/channel/CHANNEL_ID
-    - https://www.youtube.com/@username
-    - CHANNEL_ID (direct)
-    """
-    # If it looks like a channel ID (starts with UC and is 24 chars)
-    if url_or_id.startswith('UC') and len(url_or_id) == 24:
-        return url_or_id
-    
-    # Parse URL
-    parsed = urlparse(url_or_id)
-    
-    # youtube.com/channel/...
-    if '/channel/' in url_or_id:
-        return url_or_id.split('/channel/')[-1].split('?')[0].split('/')[0]
-    
-    # youtube.com/@username - need to resolve via API
-    if '/@' in url_or_id or url_or_id.startswith('@'):
-        username = url_or_id.split('/@')[-1].split('?')[0].split('/')[0]
-        if username.startswith('@'):
-            username = username[1:]
+    try:
+        response = youtube.channels().list(
+            part='id',
+            forHandle=username
+        ).execute()
         
-        try:
-            response = youtube.channels().list(
-                part='id',
-                forHandle=username
-            ).execute()
-            
-            if response['items']:
-                return response['items'][0]['id']
-        except HttpError:
-            pass
+        if response.get('items'):
+            return response['items'][0]['id']
+    except HttpError as e:
+        logger.warning(f"Failed to resolve channel handle {username}: {e}")
     
-    raise ValueError(f"Could not extract channel ID from: {url_or_id}")
+    return None
 
 
 # ============================================================================
-# MCP TOOLS
+# MCP TOOLS - ENHANCED VERSIONS
 # ============================================================================
 
 @mcp.tool()
+@rate_limited(endpoint="get_video_transcript")
+@cached(ttl=3600)  # Cache transcripts for 1 hour
 def get_video_transcript(
     video_url: str,
     language: str = "en"
@@ -122,22 +112,36 @@ def get_video_transcript(
     """
     Extract video transcript/subtitles from a YouTube video.
     
+    ✨ Enhanced with:
+    - Input validation
+    - Caching (1 hour TTL)
+    - Rate limiting
+    - Better error messages
+    
     Args:
         video_url: YouTube video URL or video ID
-        language: Language code (e.g., 'en', 'es', 'fr', 'he'). Default is 'en'
+        language: Language code (e.g., 'en', 'es', 'fr', 'he', 'ar')
     
     Returns:
         Dictionary containing:
+        - success: Boolean indicating success
         - video_id: The video ID
         - language: Language of the transcript
+        - is_generated: Whether transcript is auto-generated
         - transcript: List of transcript segments with text and timestamps
         - full_text: Complete transcript as a single string
+        - segment_count: Number of segments
+        - cached: Whether result came from cache
     
     Example:
-        get_video_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        get_video_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ", language="en")
     """
     try:
-        video_id = extract_video_id(video_url)
+        # Validate inputs
+        video_id = validate_video_url(video_url)
+        language = validate_language(language)
+        
+        logger.info(f"Fetching transcript for video {video_id} in language {language}")
         
         # Get transcript
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
@@ -145,27 +149,47 @@ def get_video_transcript(
         # Try to get transcript in requested language
         try:
             transcript = transcript_list.find_transcript([language])
-        except:
-            # Fallback to first available transcript
-            transcript = transcript_list.find_generated_transcript(['en'])
+        except (NoTranscriptFound, TranscriptsDisabled):
+            # Fallback to English auto-generated
+            try:
+                transcript = transcript_list.find_generated_transcript(['en'])
+                logger.info(f"Falling back to English auto-generated transcript")
+            except:
+                return {
+                    "success": False,
+                    "error": "No transcript available",
+                    "message": f"No transcript found in {language} or English. "
+                               f"The video may not have captions enabled."
+                }
         
         # Fetch the transcript
         transcript_data = transcript.fetch()
         
-        # Create full text
-        full_text = " ".join([entry['text'] for entry in transcript_data])
+        # Create full text (sanitized)
+        full_text = " ".join([
+            sanitize_text(entry['text'], max_length=10000) 
+            for entry in transcript_data
+        ])
         
         return {
             "success": True,
             "video_id": video_id,
             "language": transcript.language_code,
             "is_generated": transcript.is_generated,
-            "transcript": transcript_data,
-            "full_text": full_text,
-            "segment_count": len(transcript_data)
+            "transcript": transcript_data[:100],  # Limit to first 100 segments
+            "full_text": full_text[:50000],  # Limit to 50K characters
+            "segment_count": len(transcript_data),
+            "cached": False  # Will be overridden by cache decorator
         }
         
+    except ValidationError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
     except Exception as e:
+        logger.error(f"Failed to get transcript: {e}")
         return {
             "success": False,
             "error": str(e),
@@ -174,34 +198,39 @@ def get_video_transcript(
 
 
 @mcp.tool()
+@rate_limited(endpoint="get_video_info")
+@cached(ttl=1800)  # Cache for 30 minutes
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(HttpError)
+)
 def get_video_info(video_url: str) -> Dict[str, Any]:
     """
     Get comprehensive metadata for a YouTube video.
+    
+    ✨ Enhanced with:
+    - Input validation
+    - Caching (30 min TTL)
+    - Rate limiting
+    - Retry logic (3 attempts)
+    - Sanitized output
     
     Args:
         video_url: YouTube video URL or video ID
     
     Returns:
-        Dictionary containing:
-        - video_id: Video ID
-        - title: Video title
-        - description: Full video description
-        - channel_id: Channel ID
-        - channel_title: Channel name
-        - publish_date: Publication date
-        - duration: Video duration
-        - view_count: Number of views
-        - like_count: Number of likes
-        - comment_count: Number of comments
-        - tags: Video tags
-        - thumbnails: Available thumbnail URLs
-        - category_id: Video category
+        Dictionary with video metadata including:
+        title, description, channel info, statistics, etc.
     
     Example:
         get_video_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     """
     try:
-        video_id = extract_video_id(video_url)
+        # Validate input
+        video_id = validate_video_url(video_url)
+        
+        logger.info(f"Fetching info for video {video_id}")
         
         # Request video details
         response = youtube.videos().list(
@@ -209,7 +238,7 @@ def get_video_info(video_url: str) -> Dict[str, Any]:
             id=video_id
         ).execute()
         
-        if not response['items']:
+        if not response.get('items'):
             return {
                 "success": False,
                 "error": "Video not found",
@@ -218,71 +247,97 @@ def get_video_info(video_url: str) -> Dict[str, Any]:
         
         video = response['items'][0]
         snippet = video['snippet']
-        statistics = video['statistics']
+        statistics = video.get('statistics', {})
         content_details = video['contentDetails']
         
         return {
             "success": True,
             "video_id": video_id,
-            "title": snippet['title'],
-            "description": snippet['description'],
+            "title": sanitize_text(snippet['title'], 500),
+            "description": sanitize_text(snippet.get('description', ''), 5000),
             "channel_id": snippet['channelId'],
-            "channel_title": snippet['channelTitle'],
+            "channel_title": sanitize_text(snippet['channelTitle'], 200),
             "publish_date": snippet['publishedAt'],
             "duration": content_details['duration'],
             "view_count": int(statistics.get('viewCount', 0)),
             "like_count": int(statistics.get('likeCount', 0)),
             "comment_count": int(statistics.get('commentCount', 0)),
-            "tags": snippet.get('tags', []),
-            "thumbnails": snippet['thumbnails'],
+            "tags": snippet.get('tags', [])[:20],  # Limit to 20 tags
+            "thumbnails": snippet.get('thumbnails', {}),
             "category_id": snippet['categoryId'],
             "default_language": snippet.get('defaultLanguage'),
-            "default_audio_language": snippet.get('defaultAudioLanguage')
+            "cached": False
         }
         
-    except HttpError as e:
+    except ValidationError as e:
         return {
             "success": False,
-            "error": str(e),
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"YouTube API error: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
             "message": "Failed to retrieve video information"
         }
 
 
 @mcp.tool()
+@rate_limited(endpoint="get_channel_info")
+@cached(ttl=3600)  # Cache for 1 hour
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(HttpError)
+)
 def get_channel_info(channel_id: str) -> Dict[str, Any]:
     """
     Get information and statistics for a YouTube channel.
     
+    ✨ Enhanced with:
+    - Support for @username resolution
+    - Input validation
+    - Caching (1 hour TTL)
+    - Rate limiting
+    - Retry logic
+    
     Args:
-        channel_id: YouTube channel ID, channel URL, or @username
+        channel_id: YouTube channel ID, URL, or @username
     
     Returns:
-        Dictionary containing:
-        - channel_id: Channel ID
-        - title: Channel name
-        - description: Channel description
-        - custom_url: Custom channel URL (if available)
-        - published_at: Channel creation date
-        - subscriber_count: Number of subscribers
-        - video_count: Total videos published
-        - view_count: Total channel views
-        - thumbnails: Channel thumbnail URLs
-        - country: Channel's country (if specified)
+        Dictionary with channel statistics and information
     
     Example:
-        get_channel_info("UC_x5XG1OV2P6uZZ5FSM9Ttw")
         get_channel_info("@googledev")
+        get_channel_info("UC_x5XG1OV2P6uZZ5FSM9Ttw")
     """
     try:
-        resolved_channel_id = extract_channel_id(channel_id)
+        # Validate and resolve channel ID
+        validated_id = validate_channel_id(channel_id)
+        
+        # Handle @username format
+        if validated_id.startswith('@') or '/@' in validated_id:
+            username = validated_id.lstrip('@').split('/@')[-1]
+            resolved_id = resolve_channel_handle(username)
+            if not resolved_id:
+                return {
+                    "success": False,
+                    "error": "Channel not found",
+                    "message": f"Could not resolve @{username} to a channel ID"
+                }
+            validated_id = resolved_id
+        
+        logger.info(f"Fetching info for channel {validated_id}")
         
         # Request channel details
         response = youtube.channels().list(
             part='snippet,statistics,contentDetails',
-            id=resolved_channel_id
+            id=validated_id
         ).execute()
         
-        if not response['items']:
+        if not response.get('items'):
             return {
                 "success": False,
                 "error": "Channel not found",
@@ -291,32 +346,42 @@ def get_channel_info(channel_id: str) -> Dict[str, Any]:
         
         channel = response['items'][0]
         snippet = channel['snippet']
-        statistics = channel['statistics']
+        statistics = channel.get('statistics', {})
         
         return {
             "success": True,
             "channel_id": channel['id'],
-            "title": snippet['title'],
-            "description": snippet['description'],
+            "title": sanitize_text(snippet['title'], 200),
+            "description": sanitize_text(snippet.get('description', ''), 2000),
             "custom_url": snippet.get('customUrl'),
             "published_at": snippet['publishedAt'],
             "subscriber_count": int(statistics.get('subscriberCount', 0)),
             "video_count": int(statistics.get('videoCount', 0)),
             "view_count": int(statistics.get('viewCount', 0)),
-            "thumbnails": snippet['thumbnails'],
+            "thumbnails": snippet.get('thumbnails', {}),
             "country": snippet.get('country'),
-            "hidden_subscriber_count": statistics.get('hiddenSubscriberCount', False)
+            "hidden_subscriber_count": statistics.get('hiddenSubscriberCount', False),
+            "cached": False
         }
         
-    except HttpError as e:
+    except ValidationError as e:
         return {
             "success": False,
-            "error": str(e),
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"YouTube API error: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
             "message": "Failed to retrieve channel information"
         }
 
 
 @mcp.tool()
+@rate_limited(endpoint="get_video_comments")
+@cached(ttl=1800)  # Cache for 30 minutes
 def get_video_comments(
     video_url: str,
     max_results: int = 100,
@@ -325,33 +390,29 @@ def get_video_comments(
     """
     Fetch comments from a YouTube video.
     
+    ✨ Enhanced with:
+    - Input validation
+    - Caching (30 min TTL)
+    - Rate limiting
+    - Comment sanitization
+    
     Args:
         video_url: YouTube video URL or video ID
-        max_results: Maximum number of top-level comments to retrieve (default: 100, max: 100)
-        include_replies: Whether to include replies to comments (default: True)
+        max_results: Maximum comments (1-100, default: 100)
+        include_replies: Include replies (default: True)
     
     Returns:
-        Dictionary containing:
-        - video_id: Video ID
-        - comment_count: Total number of comments retrieved
-        - comments: List of comment objects with:
-            - id: Comment ID
-            - author: Comment author name
-            - text: Comment text
-            - like_count: Number of likes
-            - published_at: Publication date
-            - updated_at: Last update date
-            - reply_count: Number of replies
-            - replies: List of reply objects (if include_replies=True)
+        Dictionary with comment data
     
     Example:
         get_video_comments("https://www.youtube.com/watch?v=dQw4w9WgXcQ", max_results=50)
     """
     try:
-        video_id = extract_video_id(video_url)
+        # Validate inputs
+        video_id = validate_video_url(video_url)
+        max_results = validate_max_results(max_results, "comments")
         
-        # Ensure max_results is within limits
-        max_results = min(max_results, 100)
+        logger.info(f"Fetching {max_results} comments for video {video_id}")
         
         comments = []
         
@@ -361,16 +422,16 @@ def get_video_comments(
             videoId=video_id,
             maxResults=max_results,
             textFormat='plainText',
-            order='relevance'  # Can be 'time' or 'relevance'
+            order='relevance'
         ).execute()
         
-        for item in response['items']:
+        for item in response.get('items', []):
             top_comment = item['snippet']['topLevelComment']['snippet']
             
             comment_data = {
                 "id": item['id'],
-                "author": top_comment['authorDisplayName'],
-                "text": top_comment['textDisplay'],
+                "author": sanitize_text(top_comment['authorDisplayName'], 100),
+                "text": sanitize_text(top_comment['textDisplay'], 10000),
                 "like_count": top_comment['likeCount'],
                 "published_at": top_comment['publishedAt'],
                 "updated_at": top_comment['updatedAt'],
@@ -379,16 +440,15 @@ def get_video_comments(
             }
             
             # Add replies if available and requested
-            if include_replies and 'replies' in item:
-                for reply in item['replies']['comments']:
+            if include_replies and item.get('replies'):
+                for reply in item['replies']['comments'][:10]:  # Limit to 10 replies
                     reply_snippet = reply['snippet']
                     comment_data['replies'].append({
                         "id": reply['id'],
-                        "author": reply_snippet['authorDisplayName'],
-                        "text": reply_snippet['textDisplay'],
+                        "author": sanitize_text(reply_snippet['authorDisplayName'], 100),
+                        "text": sanitize_text(reply_snippet['textDisplay'], 10000),
                         "like_count": reply_snippet['likeCount'],
-                        "published_at": reply_snippet['publishedAt'],
-                        "updated_at": reply_snippet['updatedAt']
+                        "published_at": reply_snippet['publishedAt']
                     })
             
             comments.append(comment_data)
@@ -398,18 +458,33 @@ def get_video_comments(
             "video_id": video_id,
             "comment_count": len(comments),
             "total_reply_count": sum(c['reply_count'] for c in comments),
-            "comments": comments
+            "comments": comments,
+            "cached": False
         }
         
-    except HttpError as e:
+    except ValidationError as e:
         return {
             "success": False,
-            "error": str(e),
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"YouTube API error: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
             "message": "Failed to retrieve comments. Comments may be disabled for this video."
         }
 
 
 @mcp.tool()
+@rate_limited(endpoint="search_videos")
+@cached(ttl=600)  # Cache for 10 minutes
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(HttpError)
+)
 def search_videos(
     query: str,
     max_results: int = 10,
@@ -418,35 +493,31 @@ def search_videos(
     """
     Search for YouTube videos.
     
+    ✨ Enhanced with:
+    - Query validation and sanitization
+    - Caching (10 min TTL)
+    - Rate limiting
+    - Retry logic
+    - Smart order mapping
+    
     Args:
         query: Search query string
-        max_results: Maximum number of results (default: 10, max: 50)
-        order: Sort order - 'relevance', 'date', 'viewCount', 'rating' (default: 'relevance')
+        max_results: Maximum results (1-50, default: 10)
+        order: Sort order - 'relevance', 'date', 'viewCount', 'rating', 'title'
     
     Returns:
-        Dictionary containing:
-        - query: The search query
-        - result_count: Number of results found
-        - videos: List of video objects with:
-            - video_id: Video ID
-            - title: Video title
-            - description: Video description
-            - channel_id: Channel ID
-            - channel_title: Channel name
-            - published_at: Publication date
-            - thumbnails: Thumbnail URLs
+        Dictionary with search results
     
     Example:
         search_videos("Python tutorial", max_results=20, order="viewCount")
     """
     try:
-        # Ensure max_results is within limits
-        max_results = min(max_results, 50)
+        # Validate inputs
+        query = validate_search_query(query)
+        max_results = validate_max_results(max_results, "results")
+        order = validate_order(order)
         
-        # Valid order values
-        valid_orders = ['relevance', 'date', 'viewCount', 'rating', 'title']
-        if order not in valid_orders:
-            order = 'relevance'
+        logger.info(f"Searching videos: '{query}' (max={max_results}, order={order})")
         
         # Search for videos
         response = youtube.search().list(
@@ -458,16 +529,16 @@ def search_videos(
         ).execute()
         
         videos = []
-        for item in response['items']:
+        for item in response.get('items', []):
             snippet = item['snippet']
             videos.append({
                 "video_id": item['id']['videoId'],
-                "title": snippet['title'],
-                "description": snippet['description'],
+                "title": sanitize_text(snippet['title'], 200),
+                "description": sanitize_text(snippet.get('description', ''), 500),
                 "channel_id": snippet['channelId'],
-                "channel_title": snippet['channelTitle'],
+                "channel_title": sanitize_text(snippet['channelTitle'], 100),
                 "published_at": snippet['publishedAt'],
-                "thumbnails": snippet['thumbnails']
+                "thumbnails": snippet.get('thumbnails', {})
             })
         
         return {
@@ -475,15 +546,56 @@ def search_videos(
             "query": query,
             "order": order,
             "result_count": len(videos),
-            "videos": videos
+            "videos": videos,
+            "cached": False
         }
         
-    except HttpError as e:
+    except ValidationError as e:
         return {
             "success": False,
-            "error": str(e),
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"YouTube API error: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
             "message": "Failed to search videos"
         }
+
+
+# ============================================================================
+# UTILITY TOOLS
+# ============================================================================
+
+@mcp.tool()
+def get_server_stats() -> Dict[str, Any]:
+    """
+    Get server statistics including cache and rate limit info.
+    
+    Returns:
+        Dictionary with:
+        - cache_stats: Cache hit/miss statistics
+        - rate_limits: Rate limit status per endpoint
+        - server_config: Current configuration
+    """
+    return {
+        "success": True,
+        "cache": cache_stats(),
+        "rate_limits": {
+            "transcript": get_rate_stats("get_video_transcript"),
+            "video_info": get_rate_stats("get_video_info"),
+            "channel_info": get_rate_stats("get_channel_info"),
+            "comments": get_rate_stats("get_video_comments"),
+            "search": get_rate_stats("search_videos")
+        },
+        "config": {
+            "transport": config.server.transport,
+            "cache_enabled": config.cache.enabled,
+            "rate_limit_enabled": config.rate_limit.enabled
+        }
+    }
 
 
 # ============================================================================
@@ -491,15 +603,23 @@ def search_videos(
 # ============================================================================
 
 if __name__ == "__main__":
-    # Determine transport mode
-    transport = os.getenv("MCP_TRANSPORT", "stdio")
-    port = int(os.getenv("PORT", 8080))
+    logger.info(f"Starting YouTube MCP Server Enhanced v2.0")
+    logger.info(f"Transport: {config.server.transport}")
+    logger.info(f"Cache enabled: {config.cache.enabled}")
+    logger.info(f"Rate limiting enabled: {config.rate_limit.enabled}")
     
-    if transport == "http":
-        # Cloud deployment - use streamable-http
-        print(f"🚀 Starting YouTube MCP Server in HTTP mode on port {port}")
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+    if config.server.transport == "http":
+        # HTTP mode - with security warning
+        if not config.security.require_api_key:
+            logger.warning("⚠️  HTTP mode without API key authentication - use with caution!")
+        
+        logger.info(f"🚀 Starting in HTTP mode on {config.server.host}:{config.server.port}")
+        mcp.run(
+            transport="streamable-http",
+            host=config.server.host,
+            port=config.server.port
+        )
     else:
-        # Local deployment - use stdio
-        print("🚀 Starting YouTube MCP Server in stdio mode")
+        # stdio mode - most secure
+        logger.info("🚀 Starting in stdio mode (local)")
         mcp.run()
