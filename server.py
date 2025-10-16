@@ -22,14 +22,16 @@ Provides tools for:
 
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from fastmcp import FastMCP
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from dotenv import load_dotenv
+
+# Import YouTube client manager
+from youtube_client import YouTubeClient
 
 # Import our enhanced utilities
 from config import config
@@ -48,6 +50,20 @@ from utils import (
     get_rate_stats
 )
 
+# Import Playlist Management modules
+from playlist import (
+    PlaylistCreator,
+    PlaylistManager,
+    PlaylistUpdater,
+    PlaylistReorderer
+)
+
+# Import Captions Management modules
+from captions import (
+    CaptionsManager,
+    CaptionsAnalyzer
+)
+
 # Load environment variables
 load_dotenv()
 
@@ -61,15 +77,44 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP("YouTube MCP Server Enhanced")
 
-# YouTube API setup with timeout
+# Initialize YouTube API client
+# Supports both API Key (read-only) and OAuth2 (full access)
 try:
-    youtube = build(
-        "youtube", 
-        "v3", 
-        developerKey=config.youtube_api.api_key,
-        cache_discovery=False
+    # Check if OAuth2 should be used
+    use_oauth = os.getenv('USE_OAUTH2', 'false').lower() == 'true'
+    
+    youtube_client = YouTubeClient(
+        api_key=config.youtube_api.api_key,
+        use_oauth=use_oauth
     )
+    
+    # Get default client (API key for read operations)
+    youtube = youtube_client.get_client()
     logger.info("YouTube API client initialized successfully")
+    
+    # Log OAuth2 status
+    if youtube_client.is_oauth_available():
+        oauth_status = youtube_client.get_oauth_status()
+        if oauth_status.get('authenticated'):
+            logger.info("✅ OAuth2 authenticated - write operations enabled")
+        else:
+            logger.info("⚠️  OAuth2 configured but not authenticated - run: python authenticate.py auth")
+    else:
+        logger.info("ℹ️  Using API key only - write operations disabled")
+    
+    # Initialize Playlist Management modules
+    # These will use OAuth2 client when needed
+    playlist_creator = PlaylistCreator(youtube)
+    playlist_manager = PlaylistManager(youtube)
+    playlist_updater = PlaylistUpdater(youtube)
+    playlist_reorderer = PlaylistReorderer(youtube)
+    logger.info("Playlist management modules initialized successfully")
+    
+    # Initialize Captions Management modules
+    captions_manager = CaptionsManager(youtube)
+    captions_analyzer = CaptionsAnalyzer()
+    logger.info("Captions management modules initialized successfully")
+    
 except Exception as e:
     logger.error(f"Failed to initialize YouTube API client: {e}")
     raise
@@ -566,6 +611,404 @@ def search_videos(
 
 
 # ============================================================================
+# PLAYLIST MANAGEMENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+@rate_limited(endpoint="create_playlist")
+def create_playlist(
+    title: str,
+    description: str = "",
+    privacy_status: str = "private",
+    tags: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Create a new YouTube playlist.
+    
+    ⚠️ Requires OAuth2 authentication (not available with API key only).
+    
+    Args:
+        title: Playlist title (required)
+        description: Playlist description
+        privacy_status: Privacy setting ('public', 'private', or 'unlisted')
+        tags: Optional list of tags
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - playlist_id: ID of created playlist
+        - title: Playlist title
+        - url: Playlist URL
+        - privacy_status: Privacy setting
+        - created_at: Creation timestamp
+    
+    Quota Cost: 50 units
+    
+    Example:
+        create_playlist(
+            title="My AI Learning Videos",
+            description="Collection of AI/ML tutorials",
+            privacy_status="private",
+            tags=["AI", "Machine Learning"]
+        )
+    """
+    try:
+        result = playlist_creator.create_playlist(
+            title=title,
+            description=description,
+            privacy_status=privacy_status,
+            tags=tags or []
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to create playlist: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to create playlist. Make sure OAuth2 authentication is configured."
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="add_video_to_playlist")
+def add_video_to_playlist(
+    playlist_id: str,
+    video_id: str,
+    position: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Add a video to a playlist.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    Args:
+        playlist_id: Target playlist ID
+        video_id: Video ID to add (or full URL)
+        position: Position in playlist (0-based, None = end)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - playlist_item_id: ID of the added item
+        - video_id: Added video ID
+        - position: Position in playlist
+    
+    Quota Cost: 50 units
+    
+    Example:
+        add_video_to_playlist(
+            playlist_id="PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            video_id="dQw4w9WgXcQ",
+            position=0  # Add to beginning
+        )
+    """
+    try:
+        # Validate and extract video ID if URL provided
+        video_id = validate_video_url(video_id)
+        
+        result = playlist_manager.add_video(
+            playlist_id=playlist_id,
+            video_id=video_id,
+            position=position
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except (ValueError, ValidationError) as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to add video to playlist: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to add video to playlist"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="remove_video_from_playlist")
+def remove_video_from_playlist(
+    playlist_id: str,
+    playlist_item_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    position: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Remove a video from a playlist.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    You must provide ONE of: playlist_item_id, video_id, or position.
+    
+    Args:
+        playlist_id: Source playlist ID
+        playlist_item_id: Specific playlist item ID to remove
+        video_id: Remove by video ID (removes first occurrence)
+        position: Remove by position (0-based)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - removed_item_id: ID of removed item
+        - video_id: Removed video ID
+        - position: Position of removed video
+    
+    Quota Cost: 51 units (1 for list + 50 for delete)
+    
+    Example:
+        # Remove by position
+        remove_video_from_playlist(
+            playlist_id="PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            position=0
+        )
+    """
+    try:
+        result = playlist_manager.remove_video(
+            playlist_id=playlist_id,
+            playlist_item_id=playlist_item_id,
+            video_id=video_id,
+            position=position
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to remove video from playlist: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to remove video from playlist"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="update_playlist")
+def update_playlist(
+    playlist_id: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    privacy_status: Optional[str] = None,
+    tags: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """
+    Update playlist metadata.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    Args:
+        playlist_id: Playlist ID to update
+        title: New title (optional)
+        description: New description (optional)
+        privacy_status: New privacy ('public', 'private', 'unlisted')
+        tags: New tags list (optional)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - playlist_id: Updated playlist ID
+        - title: Updated title
+        - description: Updated description
+        - privacy_status: Updated privacy
+    
+    Quota Cost: 50 units
+    
+    Example:
+        update_playlist(
+            playlist_id="PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            title="My Updated Playlist",
+            privacy_status="public"
+        )
+    """
+    try:
+        result = playlist_updater.update_playlist(
+            playlist_id=playlist_id,
+            title=title,
+            description=description,
+            privacy_status=privacy_status,
+            tags=tags
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to update playlist: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to update playlist"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="reorder_playlist")
+def reorder_playlist_video(
+    playlist_id: str,
+    video_id: str,
+    new_position: int
+) -> Dict[str, Any]:
+    """
+    Move a video to a new position in the playlist.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    Args:
+        playlist_id: Playlist ID
+        video_id: Video ID to move
+        new_position: Target position (0-based)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - playlist_item_id: Moved item ID
+        - video_id: Moved video ID
+        - old_position: Previous position
+        - new_position: New position
+    
+    Quota Cost: 50 units
+    
+    Example:
+        reorder_playlist_video(
+            playlist_id="PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            video_id="dQw4w9WgXcQ",
+            new_position=0  # Move to top
+        )
+    """
+    try:
+        result = playlist_reorderer.move_video(
+            playlist_id=playlist_id,
+            video_id=video_id,
+            new_position=new_position
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to reorder playlist: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to reorder playlist"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="list_user_playlists")
+@cached(ttl=300)  # Cache for 5 minutes
+def list_user_playlists(
+    max_results: int = 25
+) -> Dict[str, Any]:
+    """
+    List all playlists owned by the authenticated user.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    Args:
+        max_results: Maximum playlists to return (1-50, default: 25)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - playlists: List of playlist objects
+        - total_count: Number of playlists returned
+        - cached: Whether from cache
+    
+    Quota Cost: 1 unit
+    
+    Example:
+        list_user_playlists(max_results=50)
+    """
+    try:
+        # Validate max_results
+        if not 1 <= max_results <= 50:
+            raise ValueError("max_results must be between 1 and 50")
+        
+        response = youtube.playlists().list(
+            part='snippet,contentDetails,status',
+            mine=True,
+            maxResults=max_results
+        ).execute()
+        
+        playlists = []
+        for item in response.get('items', []):
+            snippet = item['snippet']
+            playlists.append({
+                "playlist_id": item['id'],
+                "title": sanitize_text(snippet['title'], 200),
+                "description": sanitize_text(snippet.get('description', ''), 500),
+                "privacy_status": item['status']['privacyStatus'],
+                "item_count": item['contentDetails']['itemCount'],
+                "published_at": snippet['publishedAt'],
+                "thumbnails": snippet.get('thumbnails', {})
+            })
+        
+        return {
+            "success": True,
+            "playlists": playlists,
+            "total_count": len(playlists),
+            "cached": False
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except HttpError as e:
+        logger.error(f"Failed to list playlists: {e}")
+        return {
+            "success": False,
+            "error": f"API error: {e.status_code}",
+            "message": "Failed to list playlists. Make sure OAuth2 authentication is configured."
+        }
+
+
+# ============================================================================
 # UTILITY TOOLS
 # ============================================================================
 
@@ -579,8 +1022,9 @@ def get_server_stats() -> Dict[str, Any]:
         - cache_stats: Cache hit/miss statistics
         - rate_limits: Rate limit status per endpoint
         - server_config: Current configuration
+        - oauth_status: OAuth2 authentication status
     """
-    return {
+    stats = {
         "success": True,
         "cache": cache_stats(),
         "rate_limits": {
@@ -595,6 +1039,63 @@ def get_server_stats() -> Dict[str, Any]:
             "cache_enabled": config.cache.enabled,
             "rate_limit_enabled": config.rate_limit.enabled
         }
+    }
+    
+    # Add OAuth2 status if available
+    if youtube_client.is_oauth_available():
+        stats["oauth_status"] = youtube_client.get_oauth_status()
+    else:
+        stats["oauth_status"] = {
+            "available": False,
+            "message": "OAuth2 not configured. Using API key only."
+        }
+    
+    return stats
+
+
+@mcp.tool()
+def check_oauth_status() -> Dict[str, Any]:
+    """
+    Check OAuth2 authentication status.
+    
+    Returns:
+        Dictionary with OAuth2 status and instructions
+    
+    Example:
+        check_oauth_status()
+    """
+    if not youtube_client.is_oauth_available():
+        return {
+            "authenticated": False,
+            "available": False,
+            "message": "OAuth2 not configured.",
+            "instructions": [
+                "1. Set USE_OAUTH2=true in .env",
+                "2. Download credentials.json from Google Cloud Console",
+                "3. Run: python authenticate.py auth"
+            ]
+        }
+    
+    status = youtube_client.get_oauth_status()
+    
+    if not status.get('authenticated'):
+        return {
+            **status,
+            "instructions": [
+                "Run: python authenticate.py auth",
+                "This will open a browser for authentication"
+            ]
+        }
+    
+    return {
+        **status,
+        "message": "✅ OAuth2 authenticated and ready",
+        "capabilities": [
+            "Create/edit/delete playlists",
+            "Upload/update/delete videos",
+            "Manage captions",
+            "Update channel settings"
+        ]
     }
 
 

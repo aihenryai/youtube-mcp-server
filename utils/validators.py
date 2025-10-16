@@ -330,3 +330,96 @@ def validate_order(order: str) -> str:
 def sanitize_text(text: str, max_length: Optional[int] = None) -> str:
     """Sanitize text"""
     return validator.sanitize_text(text, max_length)
+
+
+def validate_playlist_title(title: str) -> str:
+    """Validate playlist title"""
+    if not title or not isinstance(title, str):
+        raise ValidationError("Playlist title is required")
+    
+    title = title.strip()
+    
+    if len(title) < 1:
+        raise ValidationError("Playlist title cannot be empty")
+    
+    if len(title) > 150:  # YouTube limit
+        raise ValidationError("Playlist title too long (max 150 characters)")
+    
+    return sanitize_text(title, max_length=150)
+
+
+def validate_playlist_description(description: str) -> str:
+    """Validate playlist description"""
+    if not description:
+        return ""
+    
+    if not isinstance(description, str):
+        raise ValidationError("Playlist description must be a string")
+    
+    if len(description) > 5000:  # YouTube limit
+        logger.warning("Playlist description too long, truncating to 5000 chars")
+        description = description[:5000]
+    
+    return sanitize_text(description, max_length=5000)
+
+
+def validate_privacy_status(status: str) -> str:
+    """Validate privacy status"""
+    valid_statuses = ['public', 'private', 'unlisted']
+    
+    if not status or not isinstance(status, str):
+        raise ValidationError("Privacy status is required")
+    
+    status = status.strip().lower()
+    
+    if status not in valid_statuses:
+        raise ValidationError(
+            f"Invalid privacy status: {status}. "
+            f"Valid options: {', '.join(valid_statuses)}"
+        )
+    
+    return status
+
+
+def validate_playlist_tags(tags: list) -> list:
+    """Validate playlist tags"""
+    if not tags:
+        return []
+    
+    if not isinstance(tags, list):
+        raise ValidationError("Tags must be a list")
+    
+    if len(tags) > 500:  # YouTube limit
+        logger.warning("Too many tags, limiting to 500")
+        tags = tags[:500]
+    
+    validated_tags = []
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        
+        tag = sanitize_text(tag.strip(), max_length=30)
+        if tag and len(tag) > 0:
+            validated_tags.append(tag)
+    
+    return validated_tags
+
+
+def validate_api_key_format(api_key: str) -> bool:
+    """Validate YouTube API key format"""
+    if not api_key or not isinstance(api_key, str):
+        return False
+    
+    # Google API keys start with AIzaSy and are 39 chars
+    if not api_key.startswith("AIzaSy"):
+        return False
+    
+    if len(api_key) != 39:
+        return False
+    
+    # Should only contain alphanumeric, - and _
+    if not re.match(r'^[A-Za-z0-9_-]{39}
+, api_key):
+        return False
+    
+    return True

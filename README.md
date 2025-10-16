@@ -14,9 +14,17 @@ A **production-ready** Model Context Protocol (MCP) server for YouTube data extr
 - **Channel Analytics** - Channel statistics and information
 - **Comments** - Fetch comments with replies
 - **Video Search** - Search YouTube with advanced filters
+- **Playlist Management** 🆕 - Create, edit, reorder playlists (OAuth2)
 - **Server Statistics** - Monitor cache and rate limit status
 
 ### 🆕 Enhanced Features (v2.0)
+
+#### 🔐 OAuth2 Authentication (NEW!)
+- **Secure Token Storage** - AES-256 encrypted tokens
+- **Auto-Refresh** - Tokens refresh automatically
+- **Write Operations** - Full playlist management, video upload, etc.
+- **Easy Setup** - Simple CLI tool for authentication
+- **Dual Mode** - API key for read, OAuth2 for write
 
 #### ⚡ Performance
 - **Two-Tier Caching** - Memory (fast) + disk (persistent) caching
@@ -89,6 +97,9 @@ Create or edit `.env` file:
 ```env
 # Required
 YOUTUBE_API_KEY=your-api-key-here
+
+# Optional - OAuth2 (for write operations)
+USE_OAUTH2=false                 # Set to 'true' to enable playlist management
 
 # Optional - Server Settings
 MCP_TRANSPORT=stdio              # stdio (local) or http (remote)
@@ -271,14 +282,32 @@ Test coverage includes:
 
 ## ☁️ Cloud Deployment (Google Cloud Run)
 
-### Prerequisites
-- Google Cloud account
-- gcloud CLI installed and configured
+### 🔐 Production Deployment with Secret Manager
 
-### Deploy to Cloud Run
+**See full guide:** [GOOGLE_CLOUD_DEPLOYMENT.md](GOOGLE_CLOUD_DEPLOYMENT.md)
+
+For production deployments, use Google Cloud Secret Manager to securely store API keys and credentials:
 
 ```bash
-# Build and deploy
+# 1. Store secrets
+echo -n "YOUR_API_KEY" | gcloud secrets create youtube-api-key --data-file=-
+echo -n "$(openssl rand -base64 32)" | gcloud secrets create server-api-key --data-file=-
+
+# 2. Deploy with secrets
+gcloud run deploy youtube-mcp \
+  --image gcr.io/YOUR_PROJECT_ID/youtube-mcp \
+  --platform managed \
+  --region us-central1 \
+  --no-allow-unauthenticated \
+  --service-account youtube-mcp-sa@${PROJECT_ID}.iam.gserviceaccount.com \
+  --set-secrets "YOUTUBE_API_KEY=youtube-api-key:latest,SERVER_API_KEY=server-api-key:latest" \
+  --set-env-vars "ALLOWED_ORIGINS=https://your-app.com"
+```
+
+### 📋 Quick Deploy (Development/Testing)
+
+```bash
+# Build and deploy (without Secret Manager)
 gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/youtube-mcp
 gcloud run deploy youtube-mcp \
   --image gcr.io/YOUR_PROJECT_ID/youtube-mcp \
@@ -311,6 +340,10 @@ Update Claude Desktop config:
   }
 }
 ```
+
+**📚 For complete deployment instructions, security setup, and cost optimization, see:**
+- [GOOGLE_CLOUD_DEPLOYMENT.md](GOOGLE_CLOUD_DEPLOYMENT.md) - Full deployment guide
+- [SECURITY.md](SECURITY.md) - Security best practices and policies
 
 ## 🔒 Security
 
@@ -397,20 +430,42 @@ mypy server.py utils/
 ### Project Structure
 ```
 youtube-mcp-server/
-├── server.py           # Main server with enhanced features
-├── config.py           # Centralized configuration
-├── requirements.txt    # Python dependencies
-├── .env.example        # Environment template
-├── .gitignore         # Git ignore rules
-├── utils/             # Utility modules
+├── server.py                    # Main server with enhanced features
+├── config.py                    # Centralized configuration
+├── youtube_client.py            # YouTube API client
+├── requirements.txt             # Python dependencies
+├── .env.example                 # Environment template
+├── .gitignore                   # Git ignore rules
+├── Dockerfile                   # Production-ready container
+├── .gcloudignore                # Google Cloud ignore rules
+├── README.md                    # This file
+├── SECURITY.md                  # Security policy
+├── GOOGLE_CLOUD_DEPLOYMENT.md   # Cloud deployment guide
+├── auth/                        # OAuth2 authentication
+│   ├── oauth2_manager.py        # OAuth2 flow management
+│   └── token_storage.py         # Encrypted token storage
+├── playlist/                    # Playlist management
+│   ├── playlist_creator.py
+│   ├── playlist_manager.py
+│   ├── playlist_reorderer.py
+│   └── playlist_updater.py
+├── captions/                    # Caption management
+│   ├── captions_analyzer.py
+│   └── captions_manager.py
+├── utils/                       # Utility modules
 │   ├── __init__.py
-│   ├── cache.py       # Two-tier caching
-│   ├── rate_limiter.py # Rate limiting
-│   └── validators.py  # Input validation
-├── tests/             # Test suite
+│   ├── cache.py                 # Two-tier caching
+│   ├── rate_limiter.py          # Rate limiting
+│   ├── validators.py            # Input validation
+│   └── secret_manager.py        # Google Secret Manager integration
+├── tests/                       # Test suite
 │   ├── __init__.py
-│   └── test_utils.py  # Unit tests
-└── README.md          # This file
+│   ├── test_server.py
+│   └── test_utils.py
+└── docs/                        # Documentation
+    ├── OAUTH2_SETUP.md
+    ├── PLAYLIST_MANAGEMENT.md
+    └── CAPTIONS_MANAGEMENT.md
 ```
 
 ## 🤝 Contributing

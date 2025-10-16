@@ -1,0 +1,355 @@
+"""
+Captions Management Tools for YouTube MCP Server
+Add these tools to server.py after the playlist tools section
+"""
+
+# ============================================================================
+# CAPTIONS MANAGEMENT TOOLS
+# ============================================================================
+
+@mcp.tool()
+@rate_limited(endpoint="list_captions")
+@cached(ttl=1800)  # Cache for 30 minutes
+def list_caption_tracks(
+    video_id: str,
+    include_auto_generated: bool = True
+) -> Dict[str, Any]:
+    """
+    List all caption tracks available for a video.
+    
+    Args:
+        video_id: YouTube video ID or URL
+        include_auto_generated: Include auto-generated captions
+    
+    Returns:
+        Dictionary containing:
+        - video_id: Video ID
+        - tracks: List of caption tracks with details
+        - total_count: Number of tracks
+        - languages: List of available languages
+    
+    Quota Cost: 50 units
+    
+    Example:
+        list_caption_tracks("dQw4w9WgXcQ")
+    """
+    try:
+        video_id = validate_video_url(video_id)
+        
+        result = captions_manager.list_captions(
+            video_id=video_id,
+            include_auto_generated=include_auto_generated
+        )
+        
+        return {
+            "success": True,
+            **result,
+            "cached": False
+        }
+        
+    except (ValueError, ValidationError) as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Failed to list captions: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to list caption tracks"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="upload_caption")
+def upload_caption_track(
+    video_id: str,
+    caption_file_path: str,
+    language: str,
+    name: Optional[str] = None,
+    is_draft: bool = False
+) -> Dict[str, Any]:
+    """
+    Upload a new caption track to a video.
+    
+    ⚠️ Requires OAuth2 authentication (not available with API key only).
+    
+    Args:
+        video_id: YouTube video ID or URL
+        caption_file_path: Absolute path to caption file
+        language: ISO 639-1 language code (e.g., 'en', 'he')
+        name: Display name for caption track
+        is_draft: Upload as draft (not visible to viewers)
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean indicating success
+        - caption_id: ID of uploaded caption track
+        - language: Language code
+        - format: Detected file format
+    
+    Quota Cost: 400 units (expensive!)
+    
+    Supported Formats: SRT, VTT, TTML, SBV, SUB
+    
+    Example:
+        upload_caption_track(
+            video_id="dQw4w9WgXcQ",
+            caption_file_path="C:/captions/hebrew.srt",
+            language="he",
+            name="Hebrew Subtitles"
+        )
+    """
+    try:
+        video_id = validate_video_url(video_id)
+        
+        result = captions_manager.upload_caption(
+            video_id=video_id,
+            caption_file=caption_file_path,
+            language=language,
+            name=name,
+            is_draft=is_draft
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except (ValueError, ValidationError) as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Failed to upload caption: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to upload caption track. Make sure OAuth2 is configured."
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="download_caption")
+def download_caption_track(
+    caption_id: str,
+    output_file_path: Optional[str] = None,
+    format: str = "srt"
+) -> Dict[str, Any]:
+    """
+    Download a caption track.
+    
+    Args:
+        caption_id: Caption track ID
+        output_file_path: Where to save (optional, returns content if None)
+        format: Output format - 'srt', 'vtt', 'ttml', 'sbv'
+    
+    Returns:
+        Dictionary containing:
+        - success: Boolean
+        - caption_id: Caption ID
+        - format: Output format
+        - content: Caption content (if no output path)
+        - file_path: Saved file path (if output path provided)
+    
+    Quota Cost: 200 units
+    
+    Example:
+        # Download to file
+        download_caption_track(
+            caption_id="SwPG123abc",
+            output_file_path="C:/captions/downloaded.srt",
+            format="srt"
+        )
+        
+        # Get content directly
+        result = download_caption_track("SwPG123abc")
+        print(result['content'])
+    """
+    try:
+        result = captions_manager.download_caption(
+            caption_id=caption_id,
+            output_file=output_file_path,
+            format=format
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Failed to download caption: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to download caption track"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="update_caption")
+def update_caption_track(
+    caption_id: str,
+    caption_file_path: Optional[str] = None,
+    name: Optional[str] = None,
+    is_draft: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Update an existing caption track.
+    
+    ⚠️ Requires OAuth2 authentication.
+    
+    Args:
+        caption_id: Caption track ID to update
+        caption_file_path: New caption file path (optional)
+        name: New display name (optional)
+        is_draft: Change draft status (optional)
+    
+    Returns:
+        Dictionary with update confirmation
+    
+    Quota Cost: 450 units (very expensive!)
+    
+    Example:
+        # Update caption content
+        update_caption_track(
+            caption_id="SwPG123abc",
+            caption_file_path="C:/captions/updated.srt"
+        )
+        
+        # Publish draft
+        update_caption_track(
+            caption_id="SwPG123abc",
+            is_draft=False
+        )
+    """
+    try:
+        result = captions_manager.update_caption(
+            caption_id=caption_id,
+            caption_file=caption_file_path,
+            name=name,
+            is_draft=is_draft
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Failed to update caption: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to update caption track"
+        }
+
+
+@mcp.tool()
+@rate_limited(endpoint="delete_caption")
+def delete_caption_track(caption_id: str) -> Dict[str, Any]:
+    """
+    Delete a caption track.
+    
+    ⚠️ Requires OAuth2 authentication.
+    ⚠️ Cannot delete auto-generated captions.
+    
+    Args:
+        caption_id: Caption track ID to delete
+    
+    Returns:
+        Dictionary with deletion confirmation
+    
+    Quota Cost: 50 units
+    
+    Example:
+        delete_caption_track("SwPG123abc")
+    """
+    try:
+        result = captions_manager.delete_caption(caption_id)
+        
+        return result
+        
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": "Validation error",
+            "message": str(e)
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete caption: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to delete caption track"
+        }
+
+
+@mcp.tool()
+def analyze_caption_content(
+    caption_content: str,
+    format: str = "srt"
+) -> Dict[str, Any]:
+    """
+    Analyze caption content for statistics and quality metrics.
+    
+    Args:
+        caption_content: Caption file content (full text)
+        format: Caption format - 'srt', 'vtt', or 'ttml'
+    
+    Returns:
+        Dictionary containing:
+        - statistics: Word count, reading time, etc.
+        - timing: Timing analysis
+        - quality: Quality metrics and issues
+        - keywords: Top keywords extracted
+        - insights: Analysis insights
+    
+    Quota Cost: 0 units (local analysis)
+    
+    Example:
+        # Analyze downloaded caption
+        caption_result = download_caption_track("SwPG123abc")
+        analysis = analyze_caption_content(
+            caption_content=caption_result['content'],
+            format="srt"
+        )
+        
+        print(f"Word count: {analysis['statistics']['word_count']}")
+        print(f"Quality score: {analysis['quality']['quality_score']}")
+    """
+    try:
+        result = captions_analyzer.analyze_caption_content(
+            caption_content=caption_content,
+            format=format
+        )
+        
+        return {
+            "success": True,
+            **result
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to analyze caption: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to analyze caption content"
+        }

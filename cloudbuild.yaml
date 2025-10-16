@@ -1,0 +1,131 @@
+# Google Cloud Build Configuration for YouTube MCP Server
+# Automatically builds and deploys the Docker image to Cloud Run
+# 
+# Usage:
+#   gcloud builds submit --config cloudbuild.yaml
+
+steps:
+  # Step 1: Build Docker image with multiple tags
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/youtube-mcp:$SHORT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/youtube-mcp:latest'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/youtube-mcp:$BRANCH_NAME'
+      - '--cache-from'
+      - 'gcr.io/$PROJECT_ID/youtube-mcp:latest'
+      - '.'
+    waitFor: ['-']  # Start immediately
+
+  # Step 2: Push image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    args:
+      - 'push'
+      - '--all-tags'
+      - 'gcr.io/$PROJECT_ID/youtube-mcp'
+    waitFor: ['build-image']
+
+  # Step 3: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'youtube-mcp'
+      - '--image=gcr.io/$PROJECT_ID/youtube-mcp:$SHORT_SHA'
+      - '--platform=managed'
+      - '--region=$_REGION'
+      - '--no-allow-unauthenticated'
+      - '--service-account=$_SERVICE_ACCOUNT'
+      # Secrets from Secret Manager
+      - '--set-secrets=YOUTUBE_API_KEY=youtube-api-key:latest,SERVER_API_KEY=server-api-key:latest'
+      # Environment variables
+      - '--set-env-vars=MCP_TRANSPORT=http,CACHE_ENABLED=true,RATE_LIMIT_ENABLED=true,ENVIRONMENT=production'
+      # Conditional CORS (set in substitutions)
+      - '--update-env-vars=ALLOWED_ORIGINS=$_ALLOWED_ORIGINS'
+      # Resource limits
+      - '--max-instances=$_MAX_INSTANCES'
+      - '--min-instances=$_MIN_INSTANCES'
+      - '--memory=$_MEMORY'
+      - '--cpu=$_CPU'
+      - '--timeout=$_TIMEOUT'
+      - '--concurrency=$_CONCURRENCY'
+      # Tags for organization
+      - '--labels=app=youtube-mcp,environment=production,version=$SHORT_SHA'
+    waitFor: ['push-image']
+
+  # Step 4: Run integration tests (optional)
+  # - name: 'gcr.io/cloud-builders/gcloud'
+  #   id: 'run-tests'
+  #   entrypoint: bash
+  #   args:
+  #     - '-c'
+  #     - |
+  #       # Get the service URL
+  #       SERVICE_URL=$(gcloud run services describe youtube-mcp \
+  #         --region $_REGION \
+  #         --format 'value(status.url)')
+  #       
+  #       # Test health endpoint
+  #       curl -f -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  #         $SERVICE_URL/health || exit 1
+  #   waitFor: ['deploy-cloud-run']
+
+# Substitutions (default values, can be overridden)
+substitutions:
+  _REGION: 'us-central1'
+  _SERVICE_ACCOUNT: 'youtube-mcp-sa@${PROJECT_ID}.iam.gserviceaccount.com'
+  _ALLOWED_ORIGINS: ''  # Set via: --substitutions=_ALLOWED_ORIGINS=https://your-app.com
+  _MAX_INSTANCES: '3'
+  _MIN_INSTANCES: '0'
+  _MEMORY: '512Mi'
+  _CPU: '1'
+  _TIMEOUT: '300'
+  _CONCURRENCY: '80'
+
+# Build options
+options:
+  # Use faster machine type
+  machineType: 'N1_HIGHCPU_8'
+  
+  # Increase timeout for large builds
+  timeout: '1200s'
+  
+  # Use Docker layer caching
+  logging: 'CLOUD_LOGGING_ONLY'
+  
+  # Dynamic substitutions
+  dynamic_substitutions: true
+  
+  # Pool for builds (optional, for private network)
+  # pool:
+  #   name: 'projects/$PROJECT_ID/locations/$_REGION/workerPools/private-pool'
+
+# Images to push (with all tags)
+images:
+  - 'gcr.io/$PROJECT_ID/youtube-mcp:$SHORT_SHA'
+  - 'gcr.io/$PROJECT_ID/youtube-mcp:latest'
+  - 'gcr.io/$PROJECT_ID/youtube-mcp:$BRANCH_NAME'
+
+# Artifacts (optional - save build logs)
+# artifacts:
+#   objects:
+#     location: 'gs://$PROJECT_ID-build-artifacts'
+#     paths: ['logs/*.log']
+
+# Timeouts
+timeout: 1200s  # 20 minutes
+
+# Tags for organization
+tags:
+  - 'youtube-mcp'
+  - 'mcp-server'
+  - 'cloud-run'
+  - '$BRANCH_NAME'
+  - '$SHORT_SHA'

@@ -1,0 +1,104 @@
+# Docker Build Ignore File
+# These files will NOT be copied to the Docker image
+
+# ⚠️ CRITICAL - Never include secrets!
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+token.key
+*.key
+client_secret*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+
+# Git
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Cache & Logs (will be regenerated in container)
+cache/
+*.cache
+logs/
+*.log
+.pytest_cache/
+
+# Tests (not needed in production image)
+tests/
+test_*.py
+*_test.py
+pytest.ini
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+*.cover
+
+# Documentation (reduce image size)
+docs/
+*.md
+# Keep essential docs only
+!README.md
+!SECURITY.md
+
+# Docker files (no need to copy Docker-related files into the image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Cloud deployment files (not needed in container)
+.gcloudignore
+cloudbuild.yaml
+.gitlab-ci.yml
+.travis.yml
+
+# Local development files
+.editorconfig
+.pre-commit-config.yaml
+Makefile
+
+# Node modules (if any)
+node_modules/
+npm-debug.log
+yarn-error.log

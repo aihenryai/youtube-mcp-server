@@ -46,7 +46,9 @@ class TestVideoTranscriptTool:
     @patch('server.YouTubeTranscriptApi')
     def test_get_transcript_with_valid_video(self, mock_transcript_api):
         """Test transcript retrieval with valid video"""
-        from server import get_video_transcript
+        import server
+        # Access the underlying function from the MCP tool
+        get_video_transcript = server.mcp.tools['get_video_transcript'].fn
         
         # Mock transcript data
         mock_transcript = Mock()

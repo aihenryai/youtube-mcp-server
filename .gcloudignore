@@ -1,0 +1,84 @@
+# Google Cloud Build Ignore File
+# These files will NOT be uploaded to Google Cloud
+
+# ⚠️ CRITICAL - Never upload secrets!
+.env
+.env.local
+.env.production
+credentials.json
+token.json
+token.key
+*.key
+client_secret*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Cache & Logs (will be regenerated)
+cache/
+*.cache
+logs/
+*.log
+.pytest_cache/
+
+# Tests (not needed in production)
+tests/
+test_*.py
+*_test.py
+pytest.ini
+.coverage
+htmlcov/
+
+# Documentation (optional - keep if you want docs in cloud)
+docs/
+*.md
+# Keep essential docs
+!README.md
+!SECURITY.md
+
+# Docker (if building with Cloud Build)
+Dockerfile.dev
+docker-compose*.yml
+
+# Other
+.dockerignore
+.gcloudignore

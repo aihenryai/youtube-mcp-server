@@ -6,12 +6,16 @@ Centralized settings for cache, rate limiting, security, and API configuration
 
 import os
 import logging
+from pathlib import Path
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from the correct location
+# Find .env file in the same directory as this config.py file
+config_dir = Path(__file__).parent
+env_file = config_dir / ".env"
+load_dotenv(dotenv_path=env_file)
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +112,8 @@ class SecurityConfig(BaseModel):
     )
     
     allowed_origins: List[str] = Field(
-        default=["*"],
-        description="CORS allowed origins"
+        default=[],
+        description="CORS allowed origins - MUST be configured for HTTP mode"
     )
     
     max_request_size: int = Field(
@@ -117,15 +121,45 @@ class SecurityConfig(BaseModel):
         description="Maximum request size in bytes"
     )
     
+    enable_ip_rate_limiting: bool = Field(
+        default=True,
+        description="Enable per-IP rate limiting in HTTP mode"
+    )
+    
+    max_requests_per_ip_minute: int = Field(
+        default=10,
+        description="Maximum requests per IP per minute"
+    )
+    
     @validator('server_api_key', pre=True, always=True)
     def set_server_api_key(cls, v):
         return v or os.getenv("SERVER_API_KEY")
+    
+    @validator('allowed_origins', pre=True, always=True)
+    def set_allowed_origins(cls, v):
+        # Read from environment variable
+        env_origins = os.getenv("ALLOWED_ORIGINS", "")
+        if env_origins:
+            # Split by comma and strip whitespace
+            return [origin.strip() for origin in env_origins.split(",") if origin.strip()]
+        return v if v else []
+    
+    @validator('allowed_origins')
+    def validate_origins(cls, v):
+        if not v or v == ["*"]:
+            logger.warning(
+                "⚠️  SECURITY WARNING: CORS allowed_origins not configured!\n"
+                "   For HTTP mode, set ALLOWED_ORIGINS in .env file.\n"
+                "   Example: ALLOWED_ORIGINS=https://your-app.com,https://other-app.com"
+            )
+        return v
 
 
 class YouTubeAPIConfig(BaseModel):
     """YouTube API configuration"""
     
     api_key: str = Field(
+        default="",
         description="YouTube Data API v3 key"
     )
     
@@ -337,8 +371,8 @@ def validate_youtube_api_key(api_key: str) -> tuple[bool, Optional[str]]:
 # Export config for easy import
 config = get_config()
 
-# Validate API key on import if enabled
-if config.youtube_api.validate_on_startup:
+# Validate API key on import if enabled (only if not in test mode)
+if config.youtube_api.validate_on_startup and config.youtube_api.api_key != "test_api_key_for_testing":
     is_valid, error = validate_youtube_api_key(config.youtube_api.api_key)
     if not is_valid:
         logger.warning(
