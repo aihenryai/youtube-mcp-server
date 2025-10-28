@@ -13,7 +13,7 @@
 **DO NOT** open public GitHub issues for security vulnerabilities.
 
 Instead, please report security issues privately:
-- **Email**: security@your-domain.com
+- **Email**: Henrystauber22@gmail.com
 - Include: Description, steps to reproduce, potential impact, suggested fix (if any)
 - You'll receive a response within 48 hours
 
@@ -237,5 +237,5 @@ Before deploying to production:
 
 ---
 
-**Last Updated**: 2025-10-16
-**Security Contact**: security@your-domain.com
+**Last Updated**: 2025-10-27
+**Security Contact**: Henrystauber22@gmail.com

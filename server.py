@@ -50,6 +50,43 @@ from utils import (
     get_rate_stats
 )
 
+# Import security utilities
+from utils.security import (
+    PromptInjectionDetector,
+    check_injection,
+    sanitize_for_llm,
+    IPRateLimiter,
+    get_client_ip,
+    CORSValidator,
+    RequestSigner,
+    SecurityLogger
+)
+
+# Import OAuth 2.1 metadata utilities
+from utils.oauth_metadata import (
+    OAuthMetadataProvider,
+    BearerTokenValidator,
+    OAuthMiddleware,
+    create_oauth_config
+)
+
+# Import Prometheus and Health Check utilities
+from utils.prometheus_exporter import (
+    PrometheusExporter,
+    get_exporter,
+    increment,
+    set_gauge,
+    observe,
+    generate_metrics
+)
+from utils.health_check import (
+    HealthChecker,
+    get_health_checker,
+    check_health,
+    get_readiness,
+    get_liveness
+)
+
 # Import Playlist Management modules
 from playlist import (
     PlaylistCreator,
@@ -76,6 +113,75 @@ logger = logging.getLogger(__name__)
 
 # Initialize MCP server
 mcp = FastMCP("YouTube MCP Server Enhanced")
+
+# Initialize IP Rate Limiter (enabled for HTTP mode)
+ip_limiter = IPRateLimiter(
+    max_per_minute=config.rate_limit.per_ip_calls_per_minute,
+    max_per_hour=config.rate_limit.per_ip_calls_per_hour
+)
+logger.info(f"IP Rate Limiter initialized: {config.rate_limit.per_ip_calls_per_minute}/min, {config.rate_limit.per_ip_calls_per_hour}/hour")
+
+# Initialize CORS Validator (for HTTP mode)
+cors_validator = None
+if config.security.cors_enabled:
+    cors_validator = CORSValidator(
+        allowed_origins=config.security.cors_allowed_origins,
+        allowed_methods=config.security.cors_allowed_methods,
+        allowed_headers=config.security.cors_allowed_headers
+    )
+    logger.info(f"✅ CORS Validator initialized with {len(config.security.cors_allowed_origins)} origins")
+else:
+    logger.info("ℹ️  CORS validation disabled")
+
+# Initialize Request Signer (for HTTP mode integrity)
+request_signer = None
+if config.security.request_signing_enabled:
+    request_signer = RequestSigner(
+        secret_key=config.security.request_signing_secret
+    )
+    logger.info("✅ Request Signing initialized (HMAC-SHA256)")
+else:
+    logger.info("ℹ️  Request signing disabled")
+
+# Initialize Security Logger
+security_logger = None
+if config.security.security_logging_enabled:
+    security_logger = SecurityLogger(
+        log_file=config.security.security_log_file
+    )
+    logger.info(f"✅ Security Logger initialized: {config.security.security_log_file}")
+else:
+    logger.info("ℹ️  Security logging disabled")
+
+# Initialize Prometheus Exporter (always enabled)
+prometheus_exporter = get_exporter()
+logger.info("✅ Prometheus Exporter initialized")
+
+# Initialize Health Checker (always enabled)
+health_checker = get_health_checker()
+logger.info("✅ Health Checker initialized")
+
+# Initialize OAuth 2.1 Metadata Provider (for HTTP mode)
+oauth_provider = None
+if config.server.transport == "http":
+    server_url = f"http://{config.server.host}:{config.server.port}"
+    oauth_provider = OAuthMetadataProvider(
+        resource_uri=server_url,
+        authorization_servers=["https://accounts.google.com"],
+        documentation_url=f"{server_url}/docs",
+        mcp_capabilities=[
+            "video.read",
+            "video.write",
+            "playlist.read",
+            "playlist.write",
+            "captions.read",
+            "captions.write",
+            "channel.read"
+        ]
+    )
+    logger.info(f"✅ OAuth Metadata Provider initialized for {server_url}")
+else:
+    logger.info("ℹ️  OAuth metadata disabled (stdio mode)")
 
 # Initialize YouTube API client
 # Supports both API Key (read-only) and OAuth2 (full access)
@@ -123,6 +229,62 @@ except Exception as e:
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+def validate_request_security(
+    origin: Optional[str] = None,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    client_ip: Optional[str] = None
+) -> tuple[bool, Optional[str]]:
+    """
+    Validate request against all security components.
+    Returns (is_valid, error_message)
+    """
+    # 1. CORS Validation (if enabled)
+    if cors_validator and origin:
+        if not cors_validator.is_origin_allowed(origin):
+            if security_logger:
+                security_logger.log_cors_violation(
+                    origin=origin,
+                    client_ip=client_ip or "unknown"
+                )
+            return False, f"Origin {origin} not allowed"
+    
+    # 2. Request Signature Validation (if enabled)
+    if request_signer and headers:
+        # Check for signature in headers
+        signature = headers.get('X-Request-Signature')
+        timestamp = headers.get('X-Request-Timestamp')
+        nonce = headers.get('X-Request-Nonce')
+        
+        if config.security.request_signing_required:
+            if not all([signature, timestamp, nonce]):
+                if security_logger:
+                    security_logger.log_request_signature_missing(
+                        client_ip=client_ip or "unknown"
+                    )
+                return False, "Missing required signature headers"
+            
+            # Verify signature (would need request body in real impl)
+            # For now, just validate format
+            if not signature or len(signature) < 32:
+                if security_logger:
+                    security_logger.log_request_signature_invalid(
+                        client_ip=client_ip or "unknown"
+                    )
+                return False, "Invalid signature format"
+    
+    # 3. IP Rate Limiting Check
+    if client_ip and not ip_limiter.is_allowed(client_ip):
+        if security_logger:
+            security_logger.log_rate_limit_exceeded(
+                client_ip=client_ip,
+                endpoint="global"
+            )
+        return False, f"Rate limit exceeded for IP {client_ip}"
+    
+    return True, None
+
 
 def resolve_channel_handle(username: str) -> Optional[str]:
     """
@@ -182,6 +344,32 @@ def get_video_transcript(
         get_video_transcript("https://www.youtube.com/watch?v=dQw4w9WgXcQ", language="en")
     """
     try:
+        # 🔐 Security Check: Prompt Injection Detection
+        is_injection, pattern_type, details = PromptInjectionDetector.detect(video_url)
+        if is_injection:
+            logger.warning(
+                f"🚨 Prompt injection detected in get_video_transcript: "
+                f"pattern={pattern_type}, video_url={video_url[:100]}"
+            )
+            return {
+                "success": False,
+                "error": "Invalid input detected",
+                "message": "The input contains suspicious patterns and was rejected for security reasons."
+            }
+        
+        # Also check language parameter
+        is_injection, pattern_type, details = PromptInjectionDetector.detect(language)
+        if is_injection:
+            logger.warning(
+                f"🚨 Prompt injection detected in language parameter: "
+                f"pattern={pattern_type}, language={language}"
+            )
+            return {
+                "success": False,
+                "error": "Invalid input detected",
+                "message": "The language parameter contains suspicious patterns."
+            }
+        
         # Validate inputs
         video_id = validate_video_url(video_url)
         language = validate_language(language)
@@ -272,6 +460,19 @@ def get_video_info(video_url: str) -> Dict[str, Any]:
         get_video_info("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     """
     try:
+        # 🔐 Security Check: Prompt Injection Detection
+        is_injection, pattern_type, details = PromptInjectionDetector.detect(video_url)
+        if is_injection:
+            logger.warning(
+                f"🚨 Prompt injection detected in get_video_info: "
+                f"pattern={pattern_type}, video_url={video_url[:100]}"
+            )
+            return {
+                "success": False,
+                "error": "Invalid input detected",
+                "message": "The input contains suspicious patterns and was rejected for security reasons."
+            }
+        
         # Validate input
         video_id = validate_video_url(video_url)
         
@@ -557,6 +758,19 @@ def search_videos(
         search_videos("Python tutorial", max_results=20, order="viewCount")
     """
     try:
+        # 🔐 Security Check: Prompt Injection Detection
+        is_injection, pattern_type, details = PromptInjectionDetector.detect(query)
+        if is_injection:
+            logger.warning(
+                f"🚨 Prompt injection detected in search_videos: "
+                f"pattern={pattern_type}, query={query[:100]}"
+            )
+            return {
+                "success": False,
+                "error": "Invalid input detected",
+                "message": "The search query contains suspicious patterns and was rejected for security reasons."
+            }
+        
         # Validate inputs
         query = validate_search_query(query)
         max_results = validate_max_results(max_results, "results")
@@ -1015,13 +1229,14 @@ def list_user_playlists(
 @mcp.tool()
 def get_server_stats() -> Dict[str, Any]:
     """
-    Get server statistics including cache and rate limit info.
+    Get server statistics including cache, rate limit, and security info.
     
     Returns:
         Dictionary with:
         - cache_stats: Cache hit/miss statistics
         - rate_limits: Rate limit status per endpoint
         - server_config: Current configuration
+        - security_status: Security components status
         - oauth_status: OAuth2 authentication status
     """
     stats = {
@@ -1038,8 +1253,35 @@ def get_server_stats() -> Dict[str, Any]:
             "transport": config.server.transport,
             "cache_enabled": config.cache.enabled,
             "rate_limit_enabled": config.rate_limit.enabled
+        },
+        "security": {
+            "cors_enabled": config.security.cors_enabled,
+            "cors_origins_count": len(config.security.cors_allowed_origins) if config.security.cors_enabled else 0,
+            "request_signing_enabled": config.security.request_signing_enabled,
+            "request_signing_required": config.security.request_signing_required if config.security.request_signing_enabled else False,
+            "security_logging_enabled": config.security.security_logging_enabled,
+            "prompt_injection_detection": True,  # Always active
+            "ip_rate_limiting": True  # Always active
         }
     }
+    
+    # Add security logger metrics if available
+    if security_logger:
+        metrics = security_logger.get_metrics()
+        stats["security"]["metrics"] = {
+            "total_events": metrics.get("total_events", 0),
+            "high_severity_events": metrics.get("high_severity", 0),
+            "critical_severity_events": metrics.get("critical_severity", 0),
+            "blocked_requests": metrics.get("blocked_requests", 0),
+            "suspicious_ips_count": len(metrics.get("suspicious_ips", []))
+        }
+    
+    # Add CORS validator stats if available
+    if cors_validator:
+        stats["security"]["cors_allowed_origins"] = config.security.cors_allowed_origins[:5]  # First 5 only
+        if len(config.security.cors_allowed_origins) > 5:
+            stats["security"]["cors_allowed_origins"].append(f"... and {len(config.security.cors_allowed_origins) - 5} more")
+
     
     # Add OAuth2 status if available
     if youtube_client.is_oauth_available():
@@ -1048,6 +1290,22 @@ def get_server_stats() -> Dict[str, Any]:
         stats["oauth_status"] = {
             "available": False,
             "message": "OAuth2 not configured. Using API key only."
+        }
+    
+    # Add OAuth 2.1 metadata status (RFC 9728)
+    if oauth_provider:
+        stats["oauth_metadata"] = {
+            "enabled": True,
+            "resource_uri": oauth_provider.resource_uri,
+            "authorization_servers": oauth_provider.authorization_servers,
+            "endpoint": "/.well-known/oauth-protected-resource",
+            "rfc": "RFC 9728",
+            "mcp_capabilities_count": len(oauth_provider.mcp_capabilities)
+        }
+    else:
+        stats["oauth_metadata"] = {
+            "enabled": False,
+            "message": "OAuth metadata only available in HTTP mode"
         }
     
     return stats
@@ -1097,6 +1355,127 @@ def check_oauth_status() -> Dict[str, Any]:
             "Update channel settings"
         ]
     }
+
+
+@mcp.tool()
+def get_oauth_metadata() -> Dict[str, Any]:
+    """
+    Get OAuth 2.1 Protected Resource Metadata (RFC 9728).
+    
+    Returns OAuth 2.1 metadata for this MCP server including:
+    - Resource identifier
+    - Authorization servers
+    - Supported scopes
+    - Bearer token methods
+    - MCP capabilities
+    
+    This endpoint implements the standard defined in RFC 9728
+    and is accessible at /.well-known/oauth-protected-resource
+    
+    Returns:
+        Dictionary with OAuth 2.1 metadata
+    
+    Example:
+        get_oauth_metadata()
+    """
+    if not oauth_provider:
+        return {
+            "success": False,
+            "error": "OAuth metadata not available",
+            "message": "OAuth metadata is only available in HTTP mode. Current mode: stdio"
+        }
+    
+    metadata = oauth_provider.get_metadata()
+    
+    return {
+        "success": True,
+        **metadata,
+        "endpoint": "/.well-known/oauth-protected-resource",
+        "rfc": "RFC 9728 - OAuth 2.1 Protected Resource Metadata"
+    }
+
+
+@mcp.tool()
+async def server_health() -> Dict[str, Any]:
+    """
+    Get comprehensive server health status.
+    
+    Performs health checks on all server components:
+    - Basic server status
+    - YouTube API connectivity
+    - OAuth authentication
+    - Cache availability
+    - Security components
+    
+    Returns:
+        Dictionary with health status including:
+        - status: 'healthy', 'degraded', or 'unhealthy'
+        - uptime_seconds: Server uptime
+        - components: Individual component statuses
+        - version: Server version
+    
+    Example:
+        server_health()
+    """
+    try:
+        health_status = await check_health(include_details=True)
+        return {
+            "success": True,
+            **health_status
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "success": False,
+            "status": "unhealthy",
+            "error": str(e),
+            "message": "Health check failed"
+        }
+
+
+@mcp.tool()
+def server_metrics() -> Dict[str, Any]:
+    """
+    Get Prometheus metrics in text exposition format.
+    
+    Returns operational metrics including:
+    - Request counts and errors
+    - Security events (prompt injection, rate limits, CORS violations)
+    - YouTube API usage (quota, errors, cache hits)
+    - OAuth operations (token refreshes, errors)
+    - System resources (memory, CPU, uptime)
+    
+    Format: Prometheus text exposition format
+    Can be scraped by Prometheus server for monitoring and alerting.
+    
+    Returns:
+        Dictionary with:
+        - success: Boolean
+        - metrics: Prometheus text format metrics
+        - metrics_count: Number of metric families
+    
+    Example:
+        server_metrics()
+    """
+    try:
+        metrics_text = generate_metrics()
+        
+        # Count metric families (lines starting with # HELP)
+        metrics_count = len([line for line in metrics_text.split('\n') if line.startswith('# HELP')])
+        
+        return {
+            "success": True,
+            "metrics": metrics_text,
+            "metrics_count": metrics_count,
+            "format": "prometheus_text_exposition"
+        }
+    except Exception as e:
+        logger.error(f"Failed to generate metrics: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Failed to generate metrics"
+        }
 
 
 # ============================================================================

@@ -270,7 +270,7 @@ class InputValidator:
     
     def sanitize_text(self, text: str, max_length: Optional[int] = None) -> str:
         """
-        Sanitize text input (remove control characters, limit length)
+        Sanitize text input (remove control characters, Unicode tricks, limit length)
         
         Args:
             text: Text to sanitize
@@ -282,8 +282,18 @@ class InputValidator:
         if not text or not isinstance(text, str):
             return ""
         
-        # Remove control characters except newlines and tabs
+        # Remove ASCII control characters (except newlines and tabs)
         text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # Remove Unicode control characters
+        text = re.sub(r'[\x7F-\x9F\u200B-\u200D\uFEFF]', '', text)
+        
+        # Remove zero-width characters (obfuscation attempts)
+        text = text.replace('\u200B', '')  # Zero-width space
+        text = text.replace('\u200C', '')  # Zero-width non-joiner
+        text = text.replace('\u200D', '')  # Zero-width joiner
+        text = text.replace('\uFEFF', '')  # Zero-width no-break space
+        text = text.replace('\u202E', '')  # Right-to-left override
         
         # Limit length if specified
         if max_length and len(text) > max_length:

@@ -36,6 +36,15 @@ from .validators import (
     sanitize_text
 )
 
+from .oauth_metadata import (
+    OAuthResourceMetadata,
+    WWWAuthenticateChallenge,
+    OAuthMetadataProvider,
+    BearerTokenValidator,
+    OAuthMiddleware,
+    create_oauth_config
+)
+
 __all__ = [
     # Cache
     'cache_manager',
@@ -65,4 +74,12 @@ __all__ = [
     'validate_max_results',
     'validate_order',
     'sanitize_text',
+    
+    # OAuth Metadata (RFC 9728)
+    'OAuthResourceMetadata',
+    'WWWAuthenticateChallenge',
+    'OAuthMetadataProvider',
+    'BearerTokenValidator',
+    'OAuthMiddleware',
+    'create_oauth_config',
 ]

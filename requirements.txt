@@ -39,3 +39,4 @@ mypy>=1.7.0,<2.0.0                # Type checking
 # Additional utilities
 requests>=2.31.0,<3.0.0           # HTTP requests (for proxy support)
 urllib3>=2.0.0,<3.0.0             # URL handling
+psutil>=5.9.0,<7.0.0              # System metrics for Prometheus

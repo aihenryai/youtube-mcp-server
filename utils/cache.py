@@ -20,7 +20,17 @@ from cachetools import TTLCache
 from diskcache import Cache
 from config import config
 
+# Import encrypted cache (v2.1)
+try:
+    from utils.cache.encrypted_cache import EncryptedDiskCache
+    ENCRYPTION_AVAILABLE = True
+except ImportError:
+    ENCRYPTION_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+if not ENCRYPTION_AVAILABLE:
+    logger.warning("⚠️  Encrypted cache not available - install cryptography package")
 
 
 class CacheManager:
@@ -38,7 +48,21 @@ class CacheManager:
             )
             
             # Disk cache - slower, larger capacity
-            self.disk_cache = Cache(config.cache.cache_dir)
+            # Use encrypted cache if enabled and available (v2.1)
+            use_encryption = config.cache.encryption_enabled and ENCRYPTION_AVAILABLE
+            
+            if use_encryption:
+                self.disk_cache = EncryptedDiskCache(
+                    cache_dir=config.cache.cache_dir,
+                    auto_cleanup=True
+                )
+                logger.info("🔐 Using encrypted disk cache (Fernet/AES-128)")
+            else:
+                self.disk_cache = Cache(config.cache.cache_dir)
+                if config.cache.encryption_enabled:
+                    logger.warning("⚠️  Encryption enabled but cryptography not installed")
+            
+            self.encryption_enabled = use_encryption
             
             # Cleanup configuration
             self.max_disk_size_bytes = config.cache.max_disk_size_mb * 1024 * 1024
@@ -113,7 +137,12 @@ class CacheManager:
         
         # Store in both caches
         self.memory_cache[key] = value
-        self.disk_cache.set(key, value, expire=ttl)
+        
+        # Encrypted cache uses different API
+        if self.encryption_enabled:
+            self.disk_cache.set(key, value, ttl=ttl)
+        else:
+            self.disk_cache.set(key, value, expire=ttl)
         
         logger.debug(f"Cache SET: {key[:16]}... (ttl={ttl}s)")
         
@@ -252,7 +281,7 @@ class CacheManager:
         
         disk_size_bytes = self.get_disk_cache_size()
         
-        return {
+        stats = {
             "enabled": True,
             "memory_size": len(self.memory_cache),
             "memory_maxsize": self.memory_cache.maxsize,
@@ -261,8 +290,15 @@ class CacheManager:
             "disk_size_limit_mb": config.cache.max_disk_size_mb,
             "disk_usage_percent": (disk_size_bytes / self.max_disk_size_bytes) * 100 if self.max_disk_size_bytes > 0 else 0,
             "ttl_seconds": config.cache.ttl_seconds,
-            "last_cleanup": datetime.fromtimestamp(self.last_cleanup_time).isoformat()
+            "last_cleanup": datetime.fromtimestamp(self.last_cleanup_time).isoformat(),
+            "encryption_enabled": self.encryption_enabled
         }
+        
+        # Add encrypted cache-specific stats if available
+        if self.encryption_enabled and hasattr(self.disk_cache, 'stats'):
+            stats["encrypted_cache_stats"] = self.disk_cache.stats()
+        
+        return stats
 
 
 # Global cache manager instance

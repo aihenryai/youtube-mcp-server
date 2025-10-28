@@ -53,9 +53,20 @@ class CacheConfig(BaseModel):
         description="How often to run cache cleanup (hours)"
     )
     
+    # 🔐 NEW: Cache encryption (v2.1)
+    encryption_enabled: bool = Field(
+        default=True,
+        description="Enable cache encryption (Fernet/AES-128)"
+    )
+    
     @validator('enabled', pre=True, always=True)
     def set_enabled(cls, v):
         env_val = os.getenv("CACHE_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('encryption_enabled', pre=True, always=True)
+    def set_encryption_enabled(cls, v):
+        env_val = os.getenv("CACHE_ENCRYPTION_ENABLED", "true").lower()
         return env_val in ('true', '1', 'yes')
 
 
@@ -67,14 +78,31 @@ class RateLimitConfig(BaseModel):
         description="Enable/disable rate limiting"
     )
     
+    # Global rate limits
     calls_per_minute: int = Field(
         default=30,
-        description="Maximum API calls per minute"
+        description="Maximum API calls per minute (global)"
     )
     
     calls_per_hour: int = Field(
         default=1000,
-        description="Maximum API calls per hour"
+        description="Maximum API calls per hour (global)"
+    )
+    
+    # Per-IP rate limits (NEW in v2.1)
+    per_ip_enabled: bool = Field(
+        default=True,
+        description="Enable per-IP rate limiting"
+    )
+    
+    per_ip_calls_per_minute: int = Field(
+        default=10,
+        description="Maximum API calls per IP per minute"
+    )
+    
+    per_ip_calls_per_hour: int = Field(
+        default=300,
+        description="Maximum API calls per IP per hour"
     )
     
     burst_size: int = Field(
@@ -96,6 +124,19 @@ class RateLimitConfig(BaseModel):
     def set_enabled(cls, v):
         env_val = os.getenv("RATE_LIMIT_ENABLED", "true").lower()
         return env_val in ('true', '1', 'yes')
+    
+    @validator('per_ip_enabled', pre=True, always=True)
+    def set_per_ip_enabled(cls, v):
+        env_val = os.getenv("PER_IP_RATE_LIMIT_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('per_ip_calls_per_minute', pre=True, always=True)
+    def set_per_ip_calls_per_minute(cls, v):
+        return int(os.getenv("PER_IP_CALLS_PER_MINUTE", v or 10))
+    
+    @validator('per_ip_calls_per_hour', pre=True, always=True)
+    def set_per_ip_calls_per_hour(cls, v):
+        return int(os.getenv("PER_IP_CALLS_PER_HOUR", v or 300))
 
 
 class SecurityConfig(BaseModel):
@@ -104,6 +145,16 @@ class SecurityConfig(BaseModel):
     require_api_key: bool = Field(
         default=True,
         description="Require API key authentication in HTTP mode"
+    )
+    
+    enable_prompt_injection_detection: bool = Field(
+        default=True,
+        description="Enable prompt injection detection"
+    )
+    
+    prompt_injection_threshold: int = Field(
+        default=30,
+        description="Risk score threshold for prompt injection (0-100)"
     )
     
     server_api_key: Optional[str] = Field(
@@ -131,6 +182,145 @@ class SecurityConfig(BaseModel):
         description="Maximum requests per IP per minute"
     )
     
+    # 🔐 NEW v2.1: CORS Configuration
+    cors_enabled: bool = Field(
+        default=True,
+        description="Enable CORS validation"
+    )
+    
+    cors_allowed_methods: List[str] = Field(
+        default=["GET", "POST", "OPTIONS"],
+        description="Allowed HTTP methods for CORS"
+    )
+    
+    cors_allowed_headers: List[str] = Field(
+        default=["Content-Type", "Authorization", "X-Request-ID"],
+        description="Allowed headers for CORS"
+    )
+    
+    cors_allow_credentials: bool = Field(
+        default=True,
+        description="Allow credentials in CORS requests"
+    )
+    
+    cors_max_age: int = Field(
+        default=86400,  # 24 hours
+        description="CORS preflight cache duration (seconds)"
+    )
+    
+    # 🔐 NEW v2.1: Request Signing
+    request_signing_enabled: bool = Field(
+        default=False,  # Optional feature, disabled by default
+        description="Enable HMAC request signature validation"
+    )
+    
+    request_signing_secret: Optional[str] = Field(
+        default=None,
+        description="Secret key for HMAC request signing (min 32 chars)"
+    )
+    
+    request_signing_algorithm: str = Field(
+        default="sha256",
+        description="HMAC algorithm: sha256 or sha512"
+    )
+    
+    request_signing_timestamp_tolerance: int = Field(
+        default=300,  # 5 minutes
+        description="Timestamp tolerance for request signatures (seconds)"
+    )
+    
+    request_signing_require_nonce: bool = Field(
+        default=True,
+        description="Require nonce for request signatures (replay protection)"
+    )
+    
+    # 🔐 NEW v2.1: Security Logging
+    security_logging_enabled: bool = Field(
+        default=True,
+        description="Enable security event logging"
+    )
+    
+    security_log_file: str = Field(
+        default="security.log",
+        description="Security log file path"
+    )
+    
+    security_log_level: str = Field(
+        default="INFO",
+        description="Security logging level"
+    )
+    
+    @validator('cors_enabled', pre=True, always=True)
+    def set_cors_enabled(cls, v):
+        env_val = os.getenv("CORS_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('request_signing_enabled', pre=True, always=True)
+    def set_request_signing_enabled(cls, v):
+        env_val = os.getenv("REQUEST_SIGNING_ENABLED", "false").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('request_signing_secret', pre=True, always=True)
+    def set_request_signing_secret(cls, v):
+        secret = v or os.getenv("REQUEST_SIGNING_SECRET")
+        if secret and len(secret) < 32:
+            logger.warning(
+                "⚠️  Request signing secret should be at least 32 characters. "
+                "Use utils/security/request_signer.py:generate_secure_secret() to generate one."
+            )
+        return secret
+    
+    @validator('security_logging_enabled', pre=True, always=True)
+    def set_security_logging_enabled(cls, v):
+        env_val = os.getenv("SECURITY_LOGGING_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    # 🔐 NEW v2.2: OAuth 2.1 Metadata (RFC 9728)
+    oauth_metadata_enabled: bool = Field(
+        default=True,
+        description="Enable OAuth 2.1 Protected Resource Metadata (RFC 9728)"
+    )
+    
+    oauth_resource_uri: Optional[str] = Field(
+        default=None,
+        description="Resource URI for OAuth metadata (auto-detected if None)"
+    )
+    
+    oauth_authorization_servers: List[str] = Field(
+        default=["https://accounts.google.com"],
+        description="List of OAuth 2.1 authorization server URLs"
+    )
+    
+    oauth_require_authentication: bool = Field(
+        default=False,
+        description="Require OAuth authentication for all requests"
+    )
+    
+    oauth_protected_tools: List[str] = Field(
+        default=[
+            "create_playlist",
+            "add_video_to_playlist",
+            "remove_video_from_playlist",
+            "update_playlist",
+            "reorder_playlist_video"
+        ],
+        description="List of tools requiring OAuth authentication"
+    )
+    
+    @validator('oauth_metadata_enabled', pre=True, always=True)
+    def set_oauth_metadata_enabled(cls, v):
+        env_val = os.getenv("OAUTH_METADATA_ENABLED", "true").lower()
+        return env_val in ('true', '1', 'yes')
+    
+    @validator('oauth_resource_uri', pre=True, always=True)
+    def set_oauth_resource_uri(cls, v):
+        return v or os.getenv("OAUTH_RESOURCE_URI")
+    
+    @validator('oauth_require_authentication', pre=True, always=True)
+    def set_oauth_require_authentication(cls, v):
+        env_val = os.getenv("OAUTH_REQUIRE_AUTHENTICATION", "false").lower()
+        return env_val in ('true', '1', 'yes')
+    
     @validator('server_api_key', pre=True, always=True)
     def set_server_api_key(cls, v):
         return v or os.getenv("SERVER_API_KEY")
@@ -145,13 +335,39 @@ class SecurityConfig(BaseModel):
         return v if v else []
     
     @validator('allowed_origins')
-    def validate_origins(cls, v):
-        if not v or v == ["*"]:
-            logger.warning(
-                "⚠️  SECURITY WARNING: CORS allowed_origins not configured!\n"
-                "   For HTTP mode, set ALLOWED_ORIGINS in .env file.\n"
-                "   Example: ALLOWED_ORIGINS=https://your-app.com,https://other-app.com"
-            )
+    def validate_origins(cls, v, values):
+        """Validate CORS origins - CRITICAL for HTTP mode"""
+        # Check if HTTP mode is enabled
+        transport = os.getenv('MCP_TRANSPORT', 'stdio')
+        
+        if transport == 'http':
+            # HTTP mode REQUIRES proper CORS configuration
+            if not v or v == ["*"]:
+                raise ValueError(
+                    "🔴 CRITICAL SECURITY ERROR: CORS must be configured for HTTP mode!\n"
+                    "\n"
+                    "Add to your .env file:\n"
+                    "  ALLOWED_ORIGINS=https://your-app.com,https://other-app.com\n"
+                    "\n"
+                    "❌ NEVER use: ALLOWED_ORIGINS=*\n"
+                    "\n"
+                    "For Google Cloud Run:\n"
+                    "  gcloud run deploy --set-env-vars ALLOWED_ORIGINS=https://your-domain.com\n"
+                )
+            
+            # Validate each origin
+            for origin in v:
+                if not origin.startswith('https://') and not origin.startswith('http://localhost'):
+                    logger.warning(
+                        f"⚠️  Origin '{origin}' should use HTTPS in production"
+                    )
+            
+            logger.info(f"✅ CORS configured for {len(v)} origin(s)")
+        
+        elif v and v != ["*"]:
+            # stdio mode but CORS is configured - just log it
+            logger.info(f"ℹ️  CORS configured but not needed in stdio mode")
+        
         return v
 
 
